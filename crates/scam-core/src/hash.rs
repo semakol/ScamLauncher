@@ -5,6 +5,12 @@ use std::path::Path;
 
 /// SHA-1 и размер файла.
 pub fn sha1_file(path: &Path) -> io::Result<(String, u64)> {
+    let (hasher, size) = sha1_state(path)?;
+    Ok((hex::encode(hasher.finalize()), size))
+}
+
+/// Состояние SHA-1 после чтения файла — чтобы продолжить хэшировать докачанное.
+pub fn sha1_state(path: &Path) -> io::Result<(Sha1, u64)> {
     let mut file = File::open(path)?;
     let mut hasher = Sha1::new();
     let mut buf = vec![0u8; 256 * 1024];
@@ -12,12 +18,11 @@ pub fn sha1_file(path: &Path) -> io::Result<(String, u64)> {
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
-            break;
+            return Ok((hasher, size));
         }
         hasher.update(&buf[..n]);
         size += n as u64;
     }
-    Ok((hex::encode(hasher.finalize()), size))
 }
 
 pub fn sha1_bytes(data: &[u8]) -> String {

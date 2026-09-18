@@ -44,6 +44,11 @@ impl YaError {
         }
     }
 
+    /// Похоже на отсутствие сети или сбой сервера (а не на «файла нет»).
+    pub fn is_network(&self) -> bool {
+        self.is_transient()
+    }
+
     fn is_transient(&self) -> bool {
         match self {
             YaError::Http(e) => e.is_timeout() || e.is_connect() || e.is_request() || e.is_body(),
@@ -132,9 +137,13 @@ pub fn http_client(user_agent: &str) -> Client {
 
 /// Повторяет запрос при сетевых сбоях, 429 и 5xx.
 async fn send(make: impl Fn() -> RequestBuilder) -> Result<Response> {
+    send_n(ATTEMPTS, make).await
+}
+
+async fn send_n(attempts: u32, make: impl Fn() -> RequestBuilder) -> Result<Response> {
     let mut delay = Duration::from_millis(500);
     for attempt in 1.. {
-        let last = attempt == ATTEMPTS;
+        let last = attempt >= attempts;
         match make().send().await {
             Ok(resp) => {
                 let s = resp.status();
@@ -161,11 +170,19 @@ where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<T>>,
 {
+    retry_op_n(ATTEMPTS, op).await
+}
+
+async fn retry_op_n<T, F, Fut>(attempts: u32, op: F) -> Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<T>>,
+{
     let mut delay = Duration::from_millis(500);
     let mut attempt = 1;
     loop {
         match op().await {
-            Err(e) if e.is_transient() && attempt < ATTEMPTS => {
+            Err(e) if e.is_transient() && attempt < attempts => {
                 tokio::time::sleep(delay).await;
                 delay *= 2;
                 attempt += 1;
@@ -202,8 +219,8 @@ async fn check(resp: Response, what: &str) -> Result<Response> {
     })
 }
 
-async fn fetch_href(http: &Client, href: &str, what: &str) -> Result<Vec<u8>> {
-    let resp = send(|| http.get(href)).await?;
+async fn fetch_href(http: &Client, href: &str, what: &str, attempts: u32) -> Result<Vec<u8>> {
+    let resp = send_n(attempts, || http.get(href)).await?;
     Ok(check(resp, what).await?.bytes().await?.to_vec())
 }
 
@@ -212,6 +229,7 @@ async fn fetch_href(http: &Client, href: &str, what: &str) -> Result<Vec<u8>> {
 pub struct PublicDisk {
     http: Client,
     public_key: String,
+    attempts: u32,
 }
 
 impl PublicDisk {
@@ -219,12 +237,19 @@ impl PublicDisk {
         Self {
             http,
             public_key: public_url.into(),
+            attempts: ATTEMPTS,
         }
+    }
+
+    /// Меньше попыток — быстрее понять, что сети нет (когда есть сохранённая копия).
+    pub fn with_attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts.max(1);
+        self
     }
 
     pub async fn download_url(&self, rel: &str) -> Result<String> {
         let path = format!("/{rel}");
-        let resp = send(|| {
+        let resp = send_n(self.attempts, || {
             self.http
                 .get(format!("{API}/public/resources/download"))
                 .query(&[("public_key", self.public_key.as_str()), ("path", &path)])
@@ -235,7 +260,69 @@ impl PublicDisk {
 
     pub async fn get_bytes(&self, rel: &str) -> Result<Vec<u8>> {
         let href = self.download_url(rel).await?;
-        fetch_href(&self.http, &href, rel).await
+        fetch_href(&self.http, &href, rel, self.attempts).await
+    }
+
+    /// Скачивает файл в `dest` потоком, возвращает sha1 и размер.
+    /// Если `dest` уже частично скачан — докачивает (сверять sha1 — дело вызывающего).
+    pub async fn download_to(
+        &self,
+        rel: &str,
+        dest: &Path,
+        on_chunk: &(dyn Fn(u64) + Sync),
+    ) -> Result<(String, u64)> {
+        use sha1::Digest;
+        use tokio::io::AsyncWriteExt;
+        retry_op_n(self.attempts, || async {
+            let href = self.download_url(rel).await?;
+            if let Some(dir) = dest.parent() {
+                tokio::fs::create_dir_all(dir).await?;
+            }
+            let offset = tokio::fs::metadata(dest).await.map_or(0, |m| m.len());
+            let resp = send_n(self.attempts, || {
+                let req = self.http.get(&href);
+                if offset > 0 {
+                    req.header(reqwest::header::RANGE, format!("bytes={offset}-"))
+                } else {
+                    req
+                }
+            })
+            .await?;
+            if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                tokio::fs::remove_file(dest).await?;
+                return Err(YaError::Io(std::io::Error::other(
+                    "докачка не удалась, начинаю заново",
+                )));
+            }
+            let mut resp = check(resp, rel).await?;
+
+            let resumed = offset > 0 && resp.status() == StatusCode::PARTIAL_CONTENT;
+            let (mut file, mut hasher, mut size) = if resumed {
+                let (hasher, _) = {
+                    let path = dest.to_owned();
+                    tokio::task::spawn_blocking(move || crate::hash::sha1_state(&path))
+                        .await
+                        .map_err(std::io::Error::other)??
+                };
+                on_chunk(offset);
+                let file = tokio::fs::OpenOptions::new()
+                    .append(true)
+                    .open(dest)
+                    .await?;
+                (file, hasher, offset)
+            } else {
+                (tokio::fs::File::create(dest).await?, sha1::Sha1::new(), 0)
+            };
+            while let Some(chunk) = resp.chunk().await? {
+                hasher.update(&chunk);
+                file.write_all(&chunk).await?;
+                size += chunk.len() as u64;
+                on_chunk(chunk.len() as u64);
+            }
+            file.flush().await?;
+            Ok((hex::encode(hasher.finalize()), size))
+        })
+        .await
     }
 }
 
@@ -366,7 +453,7 @@ impl Disk {
         })
         .await?;
         let href = check(resp, path).await?.json::<Link>().await?.href;
-        fetch_href(&self.http, &href, path).await
+        fetch_href(&self.http, &href, path, ATTEMPTS).await
     }
 
     /// Удаляет файл или папку (в корзину, если не `permanently`). Отсутствие — не ошибка.

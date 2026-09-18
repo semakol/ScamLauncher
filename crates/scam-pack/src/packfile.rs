@@ -147,6 +147,21 @@ impl Pack {
         let background = meta.background.as_deref().map(|p| expand_path(base, p));
         for p in icon.iter().chain(&background) {
             ensure!(p.is_file(), "файл не найден: {}", p.display());
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            ensure!(
+                matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif"),
+                "{}: картинка должна быть png, jpg, webp или gif",
+                p.display()
+            );
+            ensure!(
+                std::fs::metadata(p)?.len() <= 5 * 1024 * 1024,
+                "{}: картинка больше 5 МБ",
+                p.display()
+            );
         }
 
         // pack.toml, иконка и фон внутри папки сборки в саму сборку не попадают.
@@ -206,7 +221,24 @@ impl Pack {
                     g.id
                 );
             }
-            PatternSet::parse(&g.prune).with_context(|| format!("группа «{}», prune", g.id))?;
+            let prune =
+                PatternSet::parse(&g.prune).with_context(|| format!("группа «{}», prune", g.id))?;
+            for p in &prune.0 {
+                // Лаунчер обходит только папку из начала маски — без неё prune не сработает.
+                let Some(root) = p.static_root() else {
+                    bail!(
+                        "группа «{}»: prune «{}» должен начинаться с папки, например \"mods/*.jar\"",
+                        g.id,
+                        p.as_str()
+                    );
+                };
+                let top = root.split('/').next().unwrap_or("");
+                ensure!(
+                    top != ".scam" && top != "mods-clients",
+                    "группа «{}»: prune не может касаться {top}/",
+                    g.id
+                );
+            }
             groups.push(GroupDef {
                 include: PatternSet::parse(&g.include)
                     .with_context(|| format!("группа «{}», include", g.id))?,
@@ -413,6 +445,18 @@ mod tests {
                 "[[group]]\nid=\"a\"\nmode=\"once\"\ninclude=[\"x\"]\nprune=[\"x\"]"
             ))
             .contains("prune")
+        );
+        assert!(
+            err(base(
+                "[[group]]\nid=\"a\"\nmode=\"sync\"\ninclude=[\"x\"]\nprune=[\"*.jar\"]"
+            ))
+            .contains("начинаться с папки")
+        );
+        assert!(
+            err(base(
+                "[[group]]\nid=\"a\"\nmode=\"sync\"\ninclude=[\"x\"]\nprune=[\"mods-clients/*.jar\"]"
+            ))
+            .contains("mods-clients")
         );
         assert!(
             err(base(

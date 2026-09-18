@@ -1,4 +1,5 @@
 import { formatDate, type NewsItem } from "./api";
+import Markdown from "./Markdown";
 
 export default function NewsList({ news }: { news: NewsItem[] }) {
   if (news.length === 0) return null;
@@ -9,7 +10,7 @@ export default function NewsList({ news }: { news: NewsItem[] }) {
         <article key={n.id} className="card">
           <div className="muted small">{formatDate(n.date)}</div>
           <h3>{n.title}</h3>
-          <p className="news-text">{n.text}</p>
+          <Markdown text={n.text} />
         </article>
       ))}
     </section>

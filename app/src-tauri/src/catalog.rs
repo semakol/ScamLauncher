@@ -2,7 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use scam_core::model::{Channel, GroupMode};
-use scam_core::remote::Store;
+use scam_core::remote::CachedStore;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -19,6 +19,8 @@ pub struct PackDto {
     version: String,
     has_beta: bool,
     updated: DateTime<Utc>,
+    icon: Option<String>,
+    background: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -35,6 +37,8 @@ pub struct NewsDto {
 pub struct CatalogDto {
     packs: Vec<PackDto>,
     news: Vec<NewsDto>,
+    /// Сервер недоступен — показана сохранённая копия.
+    offline: bool,
 }
 
 #[derive(Serialize)]
@@ -64,11 +68,13 @@ pub struct BuildDto {
     groups: Vec<GroupDto>,
 }
 
-pub async fn catalog(store: &Store, beta: bool) -> Result<CatalogDto, String> {
+pub async fn catalog(store: &CachedStore, beta: bool) -> Result<CatalogDto, String> {
     let (index, news) = tokio::join!(store.index(), store.news());
     let index = index.map_err(|e| e.to_string())?;
+    let offline = index.offline;
+    let index = index.value;
     // Новости не критичны: без них каталог всё равно показываем.
-    let news = news.map(|n| n.items).unwrap_or_default();
+    let news = news.map(|n| n.value.items).unwrap_or_default();
 
     let packs = index
         .packs
@@ -86,6 +92,8 @@ pub async fn catalog(store: &Store, beta: bool) -> Result<CatalogDto, String> {
                 version: info.version.clone(),
                 has_beta: p.channels.beta.is_some(),
                 updated: p.updated,
+                icon: p.icon.as_ref().map(|o| o.sha1.clone()),
+                background: p.background.as_ref().map(|o| o.sha1.clone()),
             })
         })
         .collect();
@@ -99,10 +107,14 @@ pub async fn catalog(store: &Store, beta: bool) -> Result<CatalogDto, String> {
             pack: n.pack,
         })
         .collect();
-    Ok(CatalogDto { packs, news })
+    Ok(CatalogDto {
+        packs,
+        news,
+        offline,
+    })
 }
 
-pub async fn build(store: &Store, pack: &str, build: u64) -> Result<BuildDto, String> {
+pub async fn build(store: &CachedStore, pack: &str, build: u64) -> Result<BuildDto, String> {
     let m = store.build(pack, build).await.map_err(|e| e.to_string())?;
     let mut per: HashMap<&str, (usize, u64)> = HashMap::new();
     for f in &m.files {

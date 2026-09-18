@@ -4,6 +4,7 @@ use crate::model::{BuildManifest, Index, News, SCHEMA};
 use crate::paths::{self, INDEX_FILE, NEWS_FILE};
 use crate::yadisk::{Disk, PublicDisk, YaError};
 use serde::de::DeserializeOwned;
+use std::future::Future;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
@@ -96,6 +97,99 @@ impl Store {
     }
 }
 
+impl RemoteError {
+    pub fn is_network(&self) -> bool {
+        matches!(self, RemoteError::Disk(e) if e.is_network())
+    }
+}
+
+/// Значение и признак «взято из сохранённой копии, сервер недоступен».
+#[derive(Debug, Clone)]
+pub struct Cached<T> {
+    pub value: T,
+    pub offline: bool,
+}
+
+/// Каталог с копией на диске: без сети отдаёт последнюю удачную версию.
+/// Манифесты билдов неизменяемы — сохранённый берётся сразу, без запроса.
+#[derive(Clone)]
+pub struct CachedStore {
+    store: Store,
+    dir: std::path::PathBuf,
+}
+
+impl CachedStore {
+    pub fn new(store: Store, dir: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            store,
+            dir: dir.into(),
+        }
+    }
+
+    fn save<T: serde::Serialize>(&self, rel: &str, value: &T) {
+        let path = self.dir.join(rel);
+        let tmp = path.with_extension("tmp");
+        let ok = path
+            .parent()
+            .is_some_and(|d| std::fs::create_dir_all(d).is_ok())
+            && serde_json::to_vec(value).is_ok_and(|b| std::fs::write(&tmp, b).is_ok())
+            && std::fs::rename(&tmp, &path).is_ok();
+        if !ok {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    fn load<T: DeserializeOwned>(&self, rel: &str) -> Option<T> {
+        serde_json::from_slice(&std::fs::read(self.dir.join(rel)).ok()?).ok()
+    }
+
+    async fn cached<T, F>(&self, rel: &str, fetch: F) -> Result<Cached<T>>
+    where
+        T: DeserializeOwned + serde::Serialize,
+        F: Future<Output = Result<T>>,
+    {
+        match fetch.await {
+            Ok(value) => {
+                self.save(rel, &value);
+                Ok(Cached {
+                    value,
+                    offline: false,
+                })
+            }
+            Err(e) if e.is_network() => match self.load(rel) {
+                Some(value) => Ok(Cached {
+                    value,
+                    offline: true,
+                }),
+                None => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    pub async fn index(&self) -> Result<Cached<Index>> {
+        self.cached(INDEX_FILE, self.store.index()).await
+    }
+
+    pub async fn news(&self) -> Result<Cached<News>> {
+        self.cached(NEWS_FILE, self.store.news()).await
+    }
+
+    pub async fn build(&self, pack: &str, build: u64) -> Result<BuildManifest> {
+        let rel = paths::build_file(pack, build);
+        if let Some(m) = self.load::<BuildManifest>(&rel)
+            && m.pack == pack
+            && m.build == build
+            && validate_manifest(&m).is_ok()
+        {
+            return Ok(m);
+        }
+        let m = self.store.build(pack, build).await?;
+        self.save(&rel, &m);
+        Ok(m)
+    }
+}
+
 /// Всё, что лаунчер потом запишет на диск игрока, должно пройти эту проверку.
 pub fn validate_manifest(m: &BuildManifest) -> std::result::Result<(), String> {
     let mut seen = std::collections::HashSet::new();
@@ -122,4 +216,47 @@ pub fn validate_manifest(m: &BuildManifest) -> std::result::Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Channels, IndexPack, LoaderKind};
+
+    /// Клиент, у которого нет сети: все запросы уходят в закрытый порт.
+    fn offline_store() -> Store {
+        let http = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all("http://127.0.0.1:9").unwrap())
+            .build()
+            .unwrap();
+        Store::Public(PublicDisk::new(http, "https://disk.yandex.ru/d/x").with_attempts(1))
+    }
+
+    #[tokio::test]
+    async fn offline_falls_back_to_saved_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CachedStore::new(offline_store(), dir.path());
+
+        // Копии нет — честная ошибка сети.
+        let err = store.index().await.unwrap_err();
+        assert!(err.is_network());
+
+        // Есть сохранённая копия — отдаём её с пометкой offline.
+        let mut index = Index::default();
+        index.packs.push(IndexPack {
+            id: "p".into(),
+            name: "P".into(),
+            description: None,
+            minecraft: "1.20.1".into(),
+            loader: LoaderKind::Fabric,
+            icon: None,
+            background: None,
+            channels: Channels::default(),
+            updated: chrono::Utc::now(),
+        });
+        store.save(INDEX_FILE, &index);
+        let got = store.index().await.unwrap();
+        assert!(got.offline);
+        assert_eq!(got.value.packs[0].id, "p");
+    }
 }

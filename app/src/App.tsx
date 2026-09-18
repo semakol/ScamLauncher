@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { getCatalog, storage, type Catalog } from "./api";
+import { formatSize, getCatalog, storage, type Catalog, type Pack } from "./api";
+import SettingsView from "./SettingsView";
+import { PackIcon } from "./PackImage";
+import { useSettings } from "./useSettings";
+import { useUpdater } from "./useUpdater";
 import UpdateBanner from "./UpdateBanner";
 import PackView from "./PackView";
 import NewsList from "./NewsList";
+import Console from "./Console";
+import GameNotice from "./GameNotice";
+import { ConflictNotice, DoneNotice } from "./SyncNotice";
+import { useGame, type GameState } from "./useGame";
 
 type Load =
   | { kind: "loading" }
@@ -14,14 +22,31 @@ const NICK_RE = /^[A-Za-z0-9_]{3,16}$/;
 
 export default function App() {
   const [version, setVersion] = useState("");
-  const [beta, setBeta] = useState(storage.get("beta") === "1");
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [selected, setSelected] = useState<string | null>(storage.get("pack"));
-  const [nick, setNick] = useState(storage.get("nick") ?? "");
+  const [consoleOpen, setConsoleOpen] = useState(false);
+  const [view, setView] = useState<"main" | "settings">("main");
+  const game = useGame();
+  const settings = useSettings();
+  const updater = useUpdater();
+  const beta = settings.info?.settings.beta ?? false;
+  const [nick, setNick] = useState("");
 
   useEffect(() => {
     getVersion().then(setVersion).catch(() => setVersion("dev"));
   }, []);
+
+  // Ник из настроек — один раз после загрузки; сохраняется с задержкой, не на каждую букву.
+  const savedNick = settings.info?.settings.nick;
+  useEffect(() => {
+    if (savedNick !== undefined) setNick((n) => n || savedNick);
+  }, [savedNick]);
+  const { update: updateSettings } = settings;
+  useEffect(() => {
+    if (savedNick === undefined || nick === savedNick) return;
+    const t = setTimeout(() => updateSettings((s) => ({ ...s, nick })), 500);
+    return () => clearTimeout(t);
+  }, [nick, savedNick, updateSettings]);
 
   const refresh = useCallback(() => {
     setLoad({ kind: "loading" });
@@ -30,26 +55,20 @@ export default function App() {
       .catch((e) => setLoad({ kind: "error", message: String(e) }));
   }, [beta]);
 
-  useEffect(refresh, [refresh]);
+  const ready = settings.info !== null;
+  useEffect(() => {
+    if (ready) refresh();
+  }, [ready, refresh]);
 
   function select(id: string) {
     setSelected(id);
+    setView("main");
+    setConsoleOpen(false);
     storage.set("pack", id);
-  }
-
-  function toggleBeta(on: boolean) {
-    setBeta(on);
-    storage.set("beta", on ? "1" : "0");
-  }
-
-  function changeNick(value: string) {
-    setNick(value);
-    storage.set("nick", value);
   }
 
   const catalog = load.kind === "ready" ? load.catalog : null;
   const pack = catalog?.packs.find((p) => p.id === selected) ?? null;
-  const nickOk = NICK_RE.test(nick);
 
   return (
     <div className="layout">
@@ -73,28 +92,90 @@ export default function App() {
               className={`pack-item${p.id === selected ? " active" : ""}`}
               onClick={() => select(p.id)}
             >
+              <PackIcon sha1={p.icon} name={p.name} />
+              <span className="pack-text">
               <span className="pack-name">
                 {p.name}
                 {p.channel === "beta" && <span className="badge">бета</span>}
+                {isActive(game.state, p.id) && <span className="dot" title="Запущена" />}
               </span>
               <span className="pack-sub">
                 {p.minecraft} · {p.loader}
               </span>
+              </span>
             </button>
           ))}
         </nav>
-        <label className="toggle">
-          <input type="checkbox" checked={beta} onChange={(e) => toggleBeta(e.target.checked)} />
-          Бета-версии сборок
-        </label>
-        <div className="sidebar-footer">v{version}</div>
+        <button
+          className={`ghost settings-btn${view === "settings" ? " active-btn" : ""}`}
+          onClick={() => setView(view === "settings" ? "main" : "settings")}
+        >
+          Настройки
+        </button>
+        <div className="sidebar-footer">
+          v{version}
+          {beta && " · бета-сборки"}
+        </div>
       </aside>
 
       <main className="main">
-        <UpdateBanner />
+        <UpdateBanner updater={updater} />
+        {catalog?.offline && (
+          <div className="banner banner-warn">
+            <div className="banner-text">
+              <strong>Нет связи с сервером сборок</strong>
+              <div className="notes">
+                Показаны сохранённые данные. Играть можно, если сборка уже скачана.
+              </div>
+            </div>
+            <div className="banner-actions">
+              <button className="ghost" onClick={refresh}>
+                Повторить
+              </button>
+            </div>
+          </div>
+        )}
+        <GameNotice
+          state={game.state}
+          logs={game.logs}
+          onShowConsole={() => setConsoleOpen(true)}
+          onDismiss={game.dismiss}
+        />
+        {game.state.kind === "done" && (
+          <DoneNotice task={game.state.task} report={game.state.report} onDismiss={game.dismiss} />
+        )}
+        {game.lastSync && game.lastSync.pack === pack?.id && (
+          <ConflictNotice report={game.lastSync.report} onDismiss={game.dismissSync} />
+        )}
         <div className="content">
-          {pack ? (
-            <PackView pack={pack} news={catalog?.news ?? []} />
+          {view === "settings" && settings.info ? (
+            <SettingsView
+              info={settings.info}
+              error={settings.error}
+              busy={game.state.kind === "preparing" || game.state.kind === "running"}
+              update={settings.update}
+              reload={async () => {
+                await settings.reload();
+                refresh();
+              }}
+              updater={updater}
+              onClose={() => setView("main")}
+            />
+          ) : consoleOpen ? (
+            <Console lines={game.logs} onClose={() => setConsoleOpen(false)} />
+          ) : pack ? (
+            <PackView
+              pack={pack}
+              news={catalog?.news ?? []}
+              busy={game.state.kind === "preparing" || game.state.kind === "running"}
+              onRepair={() => game.startRepair(pack.id, pack.build)}
+              onRestore={(groups) => game.startRestore(pack.id, pack.build, groups)}
+              packSettings={settings.info?.settings.packs[pack.id] ?? { memoryMb: null, jvmArgs: "" }}
+              totalMemoryMb={settings.info?.totalMemoryMb ?? 8192}
+              onSaveSettings={(v) =>
+                settings.update((s) => ({ ...s, packs: { ...s.packs, [pack.id]: v } }))
+              }
+            />
           ) : (
             <div className="hero">
               <h1>Добро пожаловать</h1>
@@ -103,20 +184,106 @@ export default function App() {
             </div>
           )}
         </div>
-        <div className="bottom-bar">
-          <input
-            className={`nick${nick && !nickOk ? " invalid" : ""}`}
-            placeholder="Ник"
-            maxLength={16}
-            value={nick}
-            onChange={(e) => changeNick(e.target.value.trim())}
-            title="3–16 символов: латиница, цифры, _"
-          />
-          <button className="play" disabled title="Запуск игры появится в следующей версии">
-            Играть
-          </button>
-        </div>
+        <PlayBar
+          pack={pack}
+          nick={nick}
+          onNick={setNick}
+          game={game.state}
+          consoleOpen={consoleOpen}
+          onToggleConsole={() => setConsoleOpen((v) => !v)}
+          onPlay={() => {
+            if (!pack) return;
+            updateSettings((s) => ({ ...s, nick }));
+            setView("main");
+            game.start(pack.id, pack.build, nick);
+          }}
+          onStop={game.stop}
+        />
       </main>
+    </div>
+  );
+}
+
+function isActive(s: GameState, pack: string) {
+  return (s.kind === "preparing" || s.kind === "running") && s.pack === pack;
+}
+
+interface PlayBarProps {
+  pack: Pack | null;
+  nick: string;
+  onNick: (v: string) => void;
+  game: GameState;
+  consoleOpen: boolean;
+  onToggleConsole: () => void;
+  onPlay: () => void;
+  onStop: () => void;
+}
+
+function PlayBar({ pack, nick, onNick, game, consoleOpen, onToggleConsole, onPlay, onStop }: PlayBarProps) {
+  const nickOk = NICK_RE.test(nick);
+  const busy = game.kind === "preparing" || game.kind === "running";
+  const here = pack !== null && isActive(game, pack.id);
+
+  let status: React.ReactNode = null;
+  if (here && game.kind === "preparing") {
+    const pct = game.total > 0 ? Math.min(100, Math.round((game.done / game.total) * 100)) : null;
+    status = (
+      <div className="progress">
+        <div className="progress-text">
+          {game.stage}
+          {pct !== null && ` · ${formatSize(game.done)} из ${formatSize(game.total)}`}
+        </div>
+        <div className="progress-track">
+          <div
+            className={`progress-fill${pct === null ? " indeterminate" : ""}`}
+            style={pct !== null ? { width: `${pct}%` } : undefined}
+          />
+        </div>
+      </div>
+    );
+  } else if (here && game.kind === "running") {
+    status = <div className="muted">Игра запущена</div>;
+  }
+
+  let action: React.ReactNode;
+  if (here && game.kind === "running") {
+    action = (
+      <button className="play stop" onClick={onStop}>
+        Закрыть игру
+      </button>
+    );
+  } else {
+    const reason = !pack
+      ? "Выбери сборку"
+      : !nickOk
+        ? "Ник: 3–16 символов, латиница, цифры и _"
+        : busy
+          ? here
+            ? "Идёт подготовка"
+            : "Уже запущена другая сборка"
+          : undefined;
+    action = (
+      <button className="play" disabled={reason !== undefined} title={reason} onClick={onPlay}>
+        {here ? "Подготовка…" : "Играть"}
+      </button>
+    );
+  }
+
+  return (
+    <div className="bottom-bar">
+      <div className="status">{status}</div>
+      <button className={`ghost${consoleOpen ? " active-btn" : ""}`} onClick={onToggleConsole}>
+        Консоль
+      </button>
+      <input
+        className={`nick${nick && !nickOk ? " invalid" : ""}`}
+        placeholder="Ник"
+        maxLength={16}
+        value={nick}
+        onChange={(e) => onNick(e.target.value.trim())}
+        title="3–16 символов: латиница, цифры, _"
+      />
+      {action}
     </div>
   );
 }
