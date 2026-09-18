@@ -27,11 +27,19 @@ pub struct Scan {
     pub files: Vec<ScannedFile>,
     pub unmatched: Vec<String>,
     pub excluded: usize,
+    /// Группа → файлы, которые подошли под её маски, но достались группе выше.
+    pub shadowed: BTreeMap<usize, Vec<(String, usize)>>,
 }
 
 pub fn scan(pack: &Pack) -> Result<Scan> {
     let mut out = Scan::default();
     let source = &pack.source;
+    // Сначала опциональные группы (иначе общая `mods/*.jar` заберёт их файлы), потом остальные —
+    // каждые в порядке файла.
+    let order: Vec<usize> = (0..pack.groups.len())
+        .filter(|&i| pack.groups[i].optional)
+        .chain((0..pack.groups.len()).filter(|&i| !pack.groups[i].optional))
+        .collect();
     let walker = WalkDir::new(source)
         .follow_links(true)
         .sort_by_file_name()
@@ -61,15 +69,21 @@ pub fn scan(pack: &Pack) -> Result<Scan> {
             out.excluded += 1;
             continue;
         }
-        let matched = pack
-            .groups
+        let matched = order
             .iter()
-            .enumerate()
-            .find_map(|(i, g)| g.include.first_match(&rel).map(|p| (i, p)));
+            .find_map(|&i| pack.groups[i].include.first_match(&rel).map(|p| (i, p)));
         let Some((group, pattern)) = matched else {
             out.unmatched.push(rel);
             continue;
         };
+        for &other in &order {
+            if other != group && pack.groups[other].include.is_match(&rel) {
+                out.shadowed
+                    .entry(other)
+                    .or_default()
+                    .push((rel.clone(), group));
+            }
+        }
         let root = pattern
             .static_root()
             .unwrap_or_else(|| rel.split('/').next().unwrap_or(&rel).to_owned());
@@ -269,6 +283,62 @@ include = ["shaderpacks/*.zip"]
             groups.iter().find(|g| g.id == "shaders").unwrap().revision,
             3
         );
+    }
+
+    #[test]
+    fn optional_groups_win_regardless_of_order() {
+        // Опциональная группа НИЖЕ общей mods — всё равно забирает свой мод.
+        let (_dir, pack) = setup(
+            &[
+                "mods/Xaeros_Minimap_25.jar",
+                "mods/sodium.jar",
+                "mods/DistantHorizons-2.3.jar",
+            ],
+            r#"
+[[group]]
+id = "mods"
+mode = "sync"
+include = ["mods/*.jar"]
+prune = ["mods/*.jar"]
+
+[[group]]
+id = "minimap"
+name = "Миникарта"
+mode = "sync"
+optional = true
+include = ["mods/xaero*minimap*.jar"]
+
+[[group]]
+id = "shaders"
+name = "Шейдеры"
+mode = "sync"
+optional = true
+include = ["mods/iris*.jar"]
+
+[[group]]
+id = "late"
+mode = "once"
+include = ["mods/sodium.jar"]
+"#,
+        );
+        let scan = scan(&pack).unwrap();
+        let group_of = |rel: &str| {
+            let f = scan.files.iter().find(|f| f.rel == rel).unwrap();
+            pack.groups[f.group].id.as_str()
+        };
+        assert_eq!(group_of("mods/Xaeros_Minimap_25.jar"), "minimap");
+        assert_eq!(group_of("mods/sodium.jar"), "mods");
+        assert_eq!(group_of("mods/DistantHorizons-2.3.jar"), "mods");
+        // «late» пустая: её файл забрала mods выше — об этом будет предупреждение.
+        let late = pack.groups.iter().position(|g| g.id == "late").unwrap();
+        let mods = pack.groups.iter().position(|g| g.id == "mods").unwrap();
+        assert_eq!(
+            scan.shadowed[&late],
+            vec![("mods/sodium.jar".to_string(), mods)]
+        );
+        // Пустая опциональная shaders — не перекрыта, просто нет файлов.
+        let shaders = pack.groups.iter().position(|g| g.id == "shaders").unwrap();
+        assert!(!scan.shadowed.contains_key(&shaders));
     }
 
     #[test]

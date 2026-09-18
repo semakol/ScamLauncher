@@ -1,6 +1,7 @@
 //! Маски путей для групп: glob (`mods/*.jar`, `config/**`) или регулярка с префиксом `re:`.
 //!
 //! Пути всегда относительные, с `/`. В glob `*` не переходит через `/`, `**` — переходит.
+//! Регистр в glob не важен (`mods/xaero*.jar` найдёт и `Xaeros_Minimap.jar`); в регулярках — как написано.
 
 use globset::{GlobBuilder, GlobMatcher};
 use regex::Regex;
@@ -32,6 +33,7 @@ impl Pattern {
         }
         let glob = GlobBuilder::new(src)
             .literal_separator(true)
+            .case_insensitive(true)
             .backslash_escape(true)
             .build()
             .map_err(|e| PatternError::Glob(src.into(), e))?;
@@ -128,6 +130,11 @@ mod tests {
         assert!(!m("options.txt", "config/options.txt"));
         assert!(m("**/.DS_Store", ".DS_Store"));
         assert!(m("**/.DS_Store", "a/b/.DS_Store"));
+        assert!(m(
+            "mods/xaero*minimap*.jar",
+            "mods/Xaeros_Minimap_25.2_Fabric.jar"
+        ));
+        assert!(m("mods/*.jar", "mods/UPPER.JAR"));
     }
 
     #[test]

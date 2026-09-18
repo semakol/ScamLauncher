@@ -220,6 +220,7 @@ button.ghost {
 .content {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
 }
 .pack-view {
@@ -496,7 +497,6 @@ button.ghost {
   background-position: center;
   border-radius: 12px;
   padding: 120px 16px 16px;
-  margin: 0 -4px;
 }
 
 .md {
@@ -685,4 +685,57 @@ button.danger {
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+/* Длинные ссылки и пути переносятся, а не растягивают страницу вбок. */
+.md,
+.notes,
+.card,
+.banner-text,
+.server-status {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.packs {
+  overflow-x: hidden;
+}
+
+/* Тонкие малозаметные полосы прокрутки; ярче при наведении. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #ffffff1c transparent;
+}
+*:hover {
+  scrollbar-color: #ffffff38 transparent;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background-color: #ffffff1c;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: #ffffff40;
+}
+
+.badge.removed {
+  color: var(--danger);
+  border-color: #f8717166;
+}
+.removed-note {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid #f8717166;
+  border-radius: 8px;
+  background: #f871710f;
+  font-size: 13px;
+  line-height: 1.45;
 }

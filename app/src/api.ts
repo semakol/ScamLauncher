@@ -14,6 +14,8 @@ export interface Pack {
   version: string;
   hasBeta: boolean;
   updated: string;
+  /** Автор удалил сборку с сервера; у игрока она ещё установлена. */
+  removed: boolean;
   icon: string | null;
   background: string | null;
   server: string | null;

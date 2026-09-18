@@ -139,17 +139,41 @@ fn print_groups(local: &Local) {
     }
     for (i, g) in local.pack.groups.iter().enumerate() {
         let (n, size) = per.get(&i).copied().unwrap_or_default();
-        let mode = match g.mode {
-            scam_core::model::GroupMode::Sync => "sync".to_string(),
-            scam_core::model::GroupMode::Once => format!("once r{}", g.revision),
+        let mode = match (g.mode, g.optional) {
+            (_, true) if g.enabled_by_default => "опц. вкл".to_string(),
+            (_, true) => "опц. выкл".to_string(),
+            (scam_core::model::GroupMode::Sync, _) => "sync".to_string(),
+            (scam_core::model::GroupMode::Once, _) => format!("once r{}", g.revision),
         };
         println!(
-            "    {:<16} {:<8} {:>5} файлов {:>10}",
+            "    {:<16} {:<10} {:>5} файлов {:>10}",
             g.id,
             style(mode).dim(),
             n,
             ui::size(size)
         );
+    }
+    // Пустые группы, у которых файлы забрала группа выше, и пустые опциональные.
+    for (i, g) in local.pack.groups.iter().enumerate() {
+        if per.contains_key(&i) {
+            continue;
+        }
+        if let Some(taken) = local.scan.shadowed.get(&i) {
+            let (file, winner) = &taken[0];
+            let winner = &local.pack.groups[*winner].id;
+            ui::warn(format!(
+                "Группа «{}» пустая: её файлы (например, {file}) забрала группа «{winner}», она выше. \
+                 Перемести «{}» выше «{winner}».",
+                g.id, g.id
+            ));
+        } else if g.optional {
+            let masks: Vec<&str> = g.include.0.iter().map(|p| p.as_str()).collect();
+            ui::warn(format!(
+                "Опциональная группа «{}» пустая: ни один файл не подошёл под {}",
+                g.id,
+                masks.join(", ")
+            ));
+        }
     }
     if local.scan.excluded > 0 {
         println!(

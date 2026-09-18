@@ -225,13 +225,18 @@ export default function PackSettingsView(props: Props) {
             Клиентские моды
           </button>
           {onceGroups.length > 0 && (
-            <button className="ghost" disabled={busy || installedBuild === null} onClick={() => setRestoreOpen(true)}>
+            <button
+              className="ghost"
+              disabled={busy || installedBuild === null || pack.removed}
+              title={pack.removed ? "Сборку удалили с сервера — восстановить не из чего" : undefined}
+              onClick={() => setRestoreOpen(true)}
+            >
               Восстановить файлы…
             </button>
           )}
           <button
             className="ghost"
-            disabled={busy || installedBuild === null}
+            disabled={busy || installedBuild === null || pack.removed}
             onClick={props.onRepair}
             title="Перепроверить все файлы игры и сборки и скачать испорченные"
           >
@@ -297,7 +302,9 @@ export default function PackSettingsView(props: Props) {
         <p className="muted small">
           {installedBuild === null
             ? "Сборка ещё не установлена."
-            : "Папка сборки уйдёт в корзину. Сама сборка останется в списке — её можно установить заново."}
+            : pack.removed
+              ? "Папка сборки уйдёт в корзину, и сборка пропадёт из лаунчера — установить её заново будет нельзя."
+              : "Папка сборки уйдёт в корзину. Сама сборка останется в списке — её можно установить заново."}
         </p>
       </section>
 
@@ -319,6 +326,12 @@ export default function PackSettingsView(props: Props) {
               Удалится вся папка сборки: <strong>миры</strong>, настройки, скриншоты, клиентские моды.
               Она попадёт в корзину — оттуда её можно вернуть.
             </p>
+            {pack.removed && (
+              <p className="warn">
+                <strong>Эту сборку удалили с сервера.</strong> После удаления она пропадёт из лаунчера, и
+                скачать её снова будет неоткуда.
+              </p>
+            )}
             <p className="muted small">Хочешь сохранить миры — сначала скопируй папку saves из «Папка игры».</p>
             {deleteError && <div className="load-error">{deleteError}</div>}
             <div className="modal-actions">

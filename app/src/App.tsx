@@ -133,6 +133,7 @@ export default function App() {
               <span className="pack-name">
                 {p.name}
                 {p.channel === "beta" && <span className="badge">бета</span>}
+                {p.removed && <span className="badge removed">удалена</span>}
                 {isActive(game.state, p.id) && <span className="dot" title="Запущена" />}
               </span>
               <span className="pack-sub">
@@ -210,7 +211,14 @@ export default function App() {
               onSave={(v) => settings.update((s) => ({ ...s, packs: { ...s.packs, [pack.id]: v } }))}
               onRepair={() => game.startRepair(pack.id, pack.build)}
               onRestore={(groups) => game.startRestore(pack.id, pack.build, groups)}
-              onDeleted={() => setInstalled({ pack: pack.id, build: null })}
+              onDeleted={() => {
+                setInstalled({ pack: pack.id, build: null });
+                // Удалённая с сервера сборка пропадает из списка, как только её удалил игрок.
+                if (pack.removed) {
+                  setView("main");
+                  refresh();
+                }
+              }}
               onClose={() => setView("main")}
             />
           ) : pack ? (
@@ -311,6 +319,8 @@ function PlayBar({
     );
   } else if (here && game.kind === "running") {
     status = <div className="muted">Игра запущена</div>;
+  } else if (pack?.removed) {
+    status = <div className="muted">Сборку удалили с сервера — играть можно, обновлений не будет</div>;
   } else if (pack && mode === "install") {
     status = <div className="muted">Сборка ещё не скачана</div>;
   } else if (pack && mode === "update") {

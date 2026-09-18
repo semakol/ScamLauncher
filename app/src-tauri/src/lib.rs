@@ -1,5 +1,6 @@
 mod catalog;
 mod game;
+mod local;
 mod settings;
 
 use scam_core::remote::{CachedStore, Store};
@@ -58,7 +59,7 @@ type Res<T> = Result<T, String>;
 
 #[tauri::command]
 async fn get_catalog(state: tauri::State<'_, AppState>, beta: bool) -> Res<catalog::CatalogDto> {
-    catalog::catalog(&state.store, beta).await
+    catalog::catalog(&state.store, &state.settings.dirs(), beta).await
 }
 
 #[tauri::command]
@@ -67,7 +68,7 @@ async fn get_build(
     pack: String,
     build: u64,
 ) -> Res<catalog::BuildDto> {
-    catalog::build(&state.store, &pack, build).await
+    catalog::build(&state.store, &state.settings.dirs(), &pack, build).await
 }
 
 #[tauri::command]

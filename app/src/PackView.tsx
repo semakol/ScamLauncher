@@ -61,6 +61,12 @@ export default function PackView({ pack, news, unseen, statusAddress, onOpenSett
           {load.kind === "ready" && load.build.loaderVersion && ` ${load.build.loaderVersion}`}
         </div>
         {pack.description && <p>{pack.description}</p>}
+        {pack.removed && (
+          <div className="removed-note">
+            Автор удалил эту сборку с сервера. Она останется у тебя, пока ты сам её не удалишь: играть можно,
+            но обновлений и починки больше не будет.
+          </div>
+        )}
         {statusAddress && <ServerStatus address={statusAddress} />}
       </header>
 

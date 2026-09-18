@@ -186,8 +186,32 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
             text: "Загрузка сборки".into(),
         },
     );
-    let (index, manifest) =
-        tokio::try_join!(ctx.store.index(), ctx.store.build(&req.pack, req.build))?;
+    let game_dir = ctx.dirs.instance(&req.pack);
+    let index = ctx.store.index().await?;
+    // Удалена с сервера: её нет ни среди видимых, ни среди скрытых сборок.
+    let removed = !index.offline && index.value.pack(&req.pack).is_none();
+    let manifest = match ctx.store.build(&req.pack, req.build).await {
+        Ok(m) => m,
+        // Билда на сервере уже нет — берём копию, сохранённую при установке.
+        Err(e) => match crate::local::load_manifest(&game_dir) {
+            Some(m) if m.build == req.build => m,
+            _ => return Err(e.into()),
+        },
+    };
+    if removed && !matches!(req.task, Task::Play { .. }) {
+        anyhow::bail!(
+            "Сборку удалили с сервера: обновить, починить или восстановить её нельзя. Играть можно как есть."
+        );
+    }
+    if removed {
+        emit(
+            app,
+            GameEvent::Stage {
+                pack: pack.clone(),
+                text: "Сборку удалили с сервера — запускаю как есть".into(),
+            },
+        );
+    }
     if index.offline {
         emit(
             app,
@@ -246,7 +270,6 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
         ),
     };
 
-    let game_dir = ctx.dirs.instance(&req.pack);
     let sync_progress = |p: SyncProgress| match p {
         SyncProgress::Stage(text) => progress(Progress::Stage(text)),
         SyncProgress::Bytes { done, total } => progress(Progress::Bytes { done, total }),
@@ -259,31 +282,40 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
         Task::Restore { groups } => groups.clone(),
         _ => Vec::new(),
     };
-    let report = sync::sync(
-        &game_dir,
-        &manifest,
-        &source,
-        &SyncOptions {
-            verify,
-            reinstall,
-            disabled: manifest
-                .groups
-                .iter()
-                .filter(|g| {
-                    g.optional
-                        && !req
-                            .optional
-                            .get(&g.id)
-                            .copied()
-                            .unwrap_or(g.enabled_by_default)
-                })
-                .map(|g| g.id.clone())
-                .collect(),
-            world_backups: if req.backup_worlds { WORLD_BACKUPS } else { 0 },
-        },
-        &sync_progress,
-    )
-    .await?;
+    let report = if removed {
+        // Скачивать неоткуда — запускаем то, что уже есть на диске.
+        SyncReport::default()
+    } else {
+        let report = sync::sync(
+            &game_dir,
+            &manifest,
+            &source,
+            &SyncOptions {
+                verify,
+                reinstall,
+                disabled: manifest
+                    .groups
+                    .iter()
+                    .filter(|g| {
+                        g.optional
+                            && !req
+                                .optional
+                                .get(&g.id)
+                                .copied()
+                                .unwrap_or(g.enabled_by_default)
+                    })
+                    .map(|g| g.id.clone())
+                    .collect(),
+                world_backups: if req.backup_worlds { WORLD_BACKUPS } else { 0 },
+            },
+            &sync_progress,
+        )
+        .await?;
+        if let Some(entry) = index.value.pack(&req.pack) {
+            crate::local::save(&game_dir, entry, &manifest);
+        }
+        report
+    };
 
     let (nick, memory_mb, jvm_args, auto_connect, prepared) = match (&req.task, prepared) {
         (
