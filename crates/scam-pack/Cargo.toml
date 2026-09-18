@@ -1,0 +1,25 @@
+[package]
+name = "scam-pack"
+description = "Публикация сборок ScamLauncher на Яндекс Диск"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+scam-core.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+futures.workspace = true
+chrono.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+indicatif.workspace = true
+console.workspace = true
+dirs.workspace = true
+open.workspace = true
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tempfile.workspace = true

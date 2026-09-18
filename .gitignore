@@ -1,0 +1,8 @@
+/target
+node_modules/
+/app/dist
+/app/src-tauri/gen/schemas
+.DS_Store
+*.key
+*.key.pub.local
+.env

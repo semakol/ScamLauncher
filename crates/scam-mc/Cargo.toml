@@ -1,0 +1,7 @@
+[package]
+name = "scam-mc"
+description = "Установка и запуск Minecraft: Mojang, Java runtime, Fabric/Quilt/Forge/NeoForge"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

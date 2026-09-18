@@ -1,0 +1,24 @@
+[package]
+name = "scam-core"
+description = "Общая логика ScamLauncher: конфиг, формат сборок, Яндекс Диск, синхронизация файлов"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+chrono.workspace = true
+sha1.workspace = true
+hex.workspace = true
+globset.workspace = true
+regex.workspace = true
+zip.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

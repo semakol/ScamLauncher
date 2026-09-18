@@ -1,0 +1,133 @@
+name: Release
+
+# Выпуск: git tag v1.2.3 && git push origin v1.2.3
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: create
+        name: Черновик релиза
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --generate-notes \
+            --title "ScamLauncher ${GITHUB_REF_NAME#v}" -R "$GITHUB_REPOSITORY"
+          id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
+            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -1)
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+
+  build-launcher:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Системные зависимости Tauri
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Версия из тега
+        shell: bash
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - working-directory: app
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: app
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          args: --target ${{ matrix.target }}
+          updaterJsonPreferNsis: true
+
+  build-scam-pack:
+    needs: create-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: scam-pack-${{ matrix.target }}
+
+      - name: Версия из тега
+        shell: bash
+        run: node scripts/set-version.mjs "${GITHUB_REF_NAME#v}"
+
+      - name: Сборка
+        run: cargo build --release -p scam-pack --target ${{ matrix.target }}
+
+      - name: Загрузка в релиз
+        shell: bash
+        run: |
+          ext=""
+          [ "$RUNNER_OS" = "Windows" ] && ext=".exe"
+          out="scam-pack-${{ matrix.target }}$ext"
+          cp "target/${{ matrix.target }}/release/scam-pack$ext" "$out"
+          gh release upload "$GITHUB_REF_NAME" "$out" --clobber -R "$GITHUB_REPOSITORY"
+
+  publish-release:
+    needs: [create-release, build-launcher, build-scam-pack]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Опубликовать релиз
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest -R "$GITHUB_REPOSITORY"
