@@ -7,5 +7,6 @@ pub mod modid;
 pub mod paths;
 pub mod pattern;
 pub mod remote;
+pub mod server;
 pub mod sync;
 pub mod yadisk;

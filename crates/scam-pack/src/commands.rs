@@ -248,8 +248,13 @@ pub async fn status(http: reqwest::Client, config: &Path, beta: bool) -> Result<
     let index = store.index().await?;
     let entry = index.pack(&local.pack.meta.id);
     let channel = if beta { Channel::Beta } else { Channel::Stable };
+    let hidden_note = if index.is_hidden(&local.pack.meta.id) {
+        " (скрыта)"
+    } else {
+        ""
+    };
     match entry {
-        Some(e) => ui::step(format!("На диске: {}", describe(e))),
+        Some(e) => ui::step(format!("На диске{hidden_note}: {}", describe(e))),
         None => ui::step("На диске этой сборки ещё нет — будет первая публикация"),
     }
     let Some((base_ch, base)) = baseline(&store, entry, channel).await? else {
@@ -291,6 +296,8 @@ pub struct PublishArgs {
     pub changelog: Option<PathBuf>,
     pub force: bool,
     pub allow_unmatched: bool,
+    /// Новую сборку сразу скрыть.
+    pub hidden: bool,
 }
 
 pub async fn publish(http: reqwest::Client, config: &Path, args: PublishArgs) -> Result<()> {
@@ -508,6 +515,7 @@ pub async fn publish(http: reqwest::Client, config: &Path, args: PublishArgs) ->
             e.loader = pack.loader;
             e.icon = icon;
             e.background = background;
+            e.server = pack.meta.server.clone();
             e.channels.set(channel, info);
             e.updated = now;
         }
@@ -520,13 +528,19 @@ pub async fn publish(http: reqwest::Client, config: &Path, args: PublishArgs) ->
                 loader: pack.loader,
                 icon,
                 background,
+                server: pack.meta.server.clone(),
                 channels: Default::default(),
                 updated: now,
             };
             e.channels.set(channel, info);
-            index.packs.push(e);
+            if args.hidden {
+                index.hidden.push(e);
+            } else {
+                index.packs.push(e);
+            }
         }
     }
+    let hidden = index.is_hidden(&pack.meta.id);
     write_index(&publisher, &mut index).await?;
 
     ui::ok(format!(
@@ -536,6 +550,12 @@ pub async fn publish(http: reqwest::Client, config: &Path, args: PublishArgs) ->
         manifest.build,
         channel
     ));
+    if hidden {
+        ui::warn(format!(
+            "Сборка скрыта — игроки её не видят. Показать: scam-pack show {}",
+            pack.meta.id
+        ));
+    }
     Ok(())
 }
 
@@ -594,12 +614,17 @@ pub async fn promote(http: reqwest::Client, pack_id: &str, build: Option<u64>) -
 pub async fn list(http: reqwest::Client) -> Result<()> {
     let store = public_store(http);
     let index = store.index().await?;
-    if index.packs.is_empty() {
+    if index.all_packs().next().is_none() {
         ui::step("На диске пока нет сборок");
     }
-    for p in &index.packs {
+    for p in index.all_packs() {
+        let hidden = if index.is_hidden(&p.id) {
+            style(" [скрыта]").yellow().to_string()
+        } else {
+            String::new()
+        };
         println!(
-            "{} {} — {} {}",
+            "{}{hidden} {} — {} {}",
             style(&p.id).bold(),
             style(format!("«{}»", p.name)).dim(),
             p.minecraft,
@@ -694,6 +719,92 @@ pub async fn news_rm(http: reqwest::Client, id: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------- hide / show ----------
+
+pub async fn set_hidden(http: reqwest::Client, pack_id: &str, hidden: bool) -> Result<()> {
+    let publisher = Publisher::connect(http).await?;
+    let mut index = publisher.store().index().await?;
+    if index.pack(pack_id).is_none() {
+        bail!("сборки «{pack_id}» нет на диске (scam-pack list — список)");
+    }
+    if !index.set_hidden(pack_id, hidden) {
+        ui::ok(if hidden {
+            "Сборка уже скрыта"
+        } else {
+            "Сборка и так видна"
+        });
+        return Ok(());
+    }
+    write_index(&publisher, &mut index).await?;
+    if hidden {
+        ui::ok(format!(
+            "Сборка {pack_id} скрыта. Билды и файлы на месте, публиковать в неё можно. Вернуть: scam-pack show {pack_id}"
+        ));
+    } else {
+        ui::ok(format!("Сборка {pack_id} снова видна в лаунчере"));
+    }
+    Ok(())
+}
+
+// ---------- remove ----------
+
+/// Убирает сборку: сначала из индекса (игроки перестают её видеть), потом её билды,
+/// её новости и файлы, которые больше не нужны другим сборкам.
+pub async fn remove(
+    http: reqwest::Client,
+    pack_id: &str,
+    permanently: bool,
+    yes: bool,
+) -> Result<()> {
+    let publisher = Publisher::connect(http.clone()).await?;
+    let store = publisher.store();
+    let mut index = store.index().await?;
+    let entry = index
+        .pack(pack_id)
+        .with_context(|| format!("сборки «{pack_id}» нет на диске (scam-pack list — список)"))?
+        .clone();
+    let builds = publisher.build_numbers(pack_id).await?;
+    let mut news = store.news().await?;
+    let pack_news = news
+        .items
+        .iter()
+        .filter(|n| n.pack.as_deref() == Some(pack_id))
+        .count();
+
+    ui::step(format!(
+        "Сборка {} «{}»: {}",
+        style(pack_id).bold(),
+        entry.name,
+        describe(&entry)
+    ));
+    ui::step(format!(
+        "Будет удалено: билдов {}, новостей {}, и файлы, которые не нужны другим сборкам",
+        builds.len(),
+        pack_news
+    ));
+    if !yes {
+        ui::warn("Пробный прогон. Чтобы удалить, добавь --yes");
+        return Ok(());
+    }
+
+    index.remove(pack_id);
+    write_index(&publisher, &mut index).await?;
+    ui::ok("Сборка убрана из лаунчера");
+
+    if pack_news > 0 {
+        news.items.retain(|n| n.pack.as_deref() != Some(pack_id));
+        news.schema = SCHEMA;
+        publisher.put_json(paths::NEWS_FILE, &news, true).await?;
+    }
+    publisher
+        .delete(&paths::pack_dir(pack_id), permanently)
+        .await?;
+    ui::ok("Билды удалены");
+
+    ui::step("Удаляю файлы, которые больше не нужны другим сборкам");
+    gc(http, None, permanently, true).await
+}
+
 // ---------- gc ----------
 
 pub async fn gc(
@@ -708,7 +819,8 @@ pub async fn gc(
 
     let mut delete_builds: Vec<String> = Vec::new();
     let mut referenced: HashSet<String> = HashSet::new();
-    for p in &index.packs {
+    // Скрытые сборки тоже: их файлы нужны, когда сборку снова покажут.
+    for p in index.all_packs() {
         referenced.extend(p.icon.iter().chain(&p.background).map(|o| o.sha1.clone()));
         let builds = publisher.build_numbers(&p.id).await?;
         let pinned: HashSet<u64> = [p.channels.stable.as_ref(), p.channels.beta.as_ref()]

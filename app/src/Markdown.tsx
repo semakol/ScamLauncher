@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { openLink } from "./api";
 
 /**
- * Небольшой безопасный Markdown: заголовки, списки, абзацы, **жирный**, *курсив*, `код`, [ссылки](https://…).
- * HTML не вставляется — всё строится из React-элементов.
+ * Небольшой безопасный Markdown: заголовки, списки, абзацы, **жирный**, *курсив*, `код`,
+ * [ссылки](https://…) и просто адреса https://…. HTML не вставляется — только React-элементы.
  */
 export default function Markdown({ text }: { text: string }) {
   const blocks: ReactNode[] = [];
@@ -24,7 +24,17 @@ export default function Markdown({ text }: { text: string }) {
   };
   const flushPara = () => {
     if (para.length) {
-      blocks.push(<p key={blocks.length}>{inline(para.join(" "))}</p>);
+      const lines = para;
+      blocks.push(
+        <p key={blocks.length}>
+          {lines.map((l, i) => (
+            <span key={i}>
+              {i > 0 && <br />}
+              {inline(l)}
+            </span>
+          ))}
+        </p>,
+      );
       para = [];
     }
   };
@@ -63,34 +73,51 @@ export default function Markdown({ text }: { text: string }) {
   return <div className="md">{blocks}</div>;
 }
 
-const INLINE = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\))/g;
+function Link({ url, children }: { url: string; children: ReactNode }) {
+  return (
+    <a
+      href={url}
+      title={url}
+      onClick={(e) => {
+        e.preventDefault();
+        openLink(url).catch((err) => console.warn("Не удалось открыть ссылку:", err));
+      }}
+    >
+      {children}
+    </a>
+  );
+}
+
+const INLINE = /(\*\*[^*]+\*\*|\*[^*\s][^*]*\*|`[^`]+`|\[[^\]]+\]\([^)\s]+\)|https?:\/\/[^\s<>()]+)/g;
 
 function inline(text: string): ReactNode[] {
   return text.split(INLINE).map((part, i) => {
+    if (!part) return null;
     if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
-      return <strong key={i}>{part.slice(2, -2)}</strong>;
+      return <strong key={i}>{inline(part.slice(2, -2))}</strong>;
     }
     if (part.startsWith("`") && part.endsWith("`") && part.length > 2) {
       return <code key={i}>{part.slice(1, -1)}</code>;
     }
     const link = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(part);
     if (link) {
-      const url = link[2];
-      if (/^https?:\/\//i.test(url)) {
-        return (
-          <a
-            key={i}
-            href={url}
-            onClick={(e) => {
-              e.preventDefault();
-              openUrl(url).catch(() => {});
-            }}
-          >
-            {link[1]}
-          </a>
-        );
-      }
-      return link[1];
+      return /^https?:\/\//i.test(link[2]) ? (
+        <Link key={i} url={link[2]}>
+          {link[1]}
+        </Link>
+      ) : (
+        link[1]
+      );
+    }
+    if (/^https?:\/\//i.test(part)) {
+      // Точка или запятая в конце — это конец предложения, а не часть адреса.
+      const m = /^(.*?)([.,;:!?]*)$/.exec(part)!;
+      return (
+        <span key={i}>
+          <Link url={m[1]}>{m[1]}</Link>
+          {m[2]}
+        </span>
+      );
     }
     if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
       return <em key={i}>{part.slice(1, -1)}</em>;

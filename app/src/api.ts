@@ -16,6 +16,7 @@ export interface Pack {
   updated: string;
   icon: string | null;
   background: string | null;
+  server: string | null;
 }
 
 export interface NewsItem {
@@ -39,6 +40,9 @@ export interface GroupInfo {
   mode: GroupMode;
   files: number;
   size: number;
+  optional: boolean;
+  enabledByDefault: boolean;
+  description: string | null;
 }
 
 export interface BuildInfo {
@@ -116,13 +120,16 @@ export interface SyncReport {
   clientRemoved: string[];
   conflicts: { file: string; modIds: string[] }[];
   backup: string | null;
+  worldsBackup: string | null;
 }
+
+export type DoneTask = "install" | "repair" | "restore";
 
 export type GameEvent =
   | { kind: "stage"; pack: string; text: string }
   | { kind: "bytes"; pack: string; done: number; total: number }
   | { kind: "synced"; pack: string; report: SyncReport }
-  | { kind: "done"; pack: string; task: "repair" | "restore"; report: SyncReport }
+  | { kind: "done"; pack: string; task: DoneTask; report: SyncReport }
   | { kind: "started"; pack: string }
   | { kind: "log"; pack: string; lines: LogLine[] }
   | {
@@ -140,6 +147,15 @@ export const play = (pack: string, build: number, nick: string) =>
 
 export const repair = (pack: string, build: number) => invoke<void>("repair", { pack, build });
 
+export const install = (pack: string, build: number) => invoke<void>("install", { pack, build });
+
+export const instanceInfo = (pack: string) =>
+  invoke<{ installedBuild: number | null }>("instance_info", { pack });
+
+export const deleteInstance = (pack: string) => invoke<void>("delete_instance", { pack });
+
+export const openLink = (url: string) => invoke<void>("open_link", { url });
+
 export const restore = (pack: string, build: number, groups: string[]) =>
   invoke<void>("restore", { pack, build, groups });
 
@@ -147,8 +163,8 @@ export const killGame = () => invoke<boolean>("kill_game");
 
 export const runningPack = () => invoke<string | null>("running_pack");
 
-export const openInstanceDir = (pack: string, clientMods = false) =>
-  invoke<void>("open_instance_dir", { pack, clientMods });
+export const openInstanceDir = (pack: string, what?: "clientMods" | "worldBackups") =>
+  invoke<void>("open_instance_dir", { pack, what: what ?? null });
 
 export const openGameFile = (path: string) => invoke<void>("open_game_file", { path });
 
@@ -174,7 +190,40 @@ export function formatLog(lines: LogLine[]): string {
 export interface PackSettings {
   memoryMb: number | null;
   jvmArgs: string;
+  /** Свой адрес сервера; пусто — из сборки. */
+  server: string;
+  serverStatus: boolean;
+  autoConnect: boolean;
+  /** Выбор по опциональным модам: id группы → включена. */
+  optional: Record<string, boolean>;
+  /** Бэкап миров перед обновлением сборки. */
+  backupWorlds: boolean;
 }
+
+export const DEFAULT_PACK_SETTINGS: PackSettings = {
+  memoryMb: null,
+  jvmArgs: "",
+  server: "",
+  serverStatus: true,
+  autoConnect: false,
+  optional: {},
+  backupWorlds: true,
+};
+
+/** Настройки сборки с умолчаниями (старые сохранения могут быть без новых полей). */
+export function packSettingsOf(settings: Settings | undefined, pack: string): PackSettings {
+  return { ...DEFAULT_PACK_SETTINGS, ...(settings?.packs[pack] ?? {}) };
+}
+
+export interface ServerStatus {
+  online: number;
+  max: number;
+  version: string;
+  motd: string;
+  latencyMs: number;
+}
+
+export const serverStatus = (address: string) => invoke<ServerStatus>("server_status", { address });
 
 export interface Settings {
   gameDir: string | null;
@@ -182,6 +231,8 @@ export interface Settings {
   nick: string;
   jvmArgs: string;
   packs: Record<string, PackSettings>;
+  /** id новостей, которые игрок уже видел. */
+  seenNews: string[];
 }
 
 export interface SettingsInfo {

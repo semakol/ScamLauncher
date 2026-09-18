@@ -1,0 +1,118 @@
+# ============================================================
+#  Сборка для ScamLauncher. Инструкция: docs/PUBLISHING.md
+#  Проверить: scam-pack status      Опубликовать: scam-pack publish
+# ============================================================
+
+[pack]
+id = "techno"                     # латиница, цифры, «-», «_». После первой публикации НЕ МЕНЯТЬ
+name = "Техно"                    # название в лаунчере
+description = "Create, Mekanism и 150 модов про заводы"
+minecraft = "1.20.1"
+loader = "forge"                  # vanilla | fabric | quilt | forge | neoforge
+loader_version = "47.4.0"         # версия загрузчика (для vanilla не нужна)
+memory_recommended = 6144         # МБ — значение ползунка памяти по умолчанию
+# memory_min = 4096               # МБ — меньше не дать (обычно не нужно)
+# java = 17                       # своя версия Java (обычно не нужно — берётся из данных Mojang)
+
+source = "."                      # папка с файлами сборки (как .minecraft). "." — где лежит этот файл
+# source = "C:/Users/Steve/MC/techno"   # Windows: прямые слеши или 'C:\в\одинарных\кавычках'
+
+# icon = "icon.png"               # квадратная, от 64×64; png/jpg/webp/gif до 5 МБ
+# background = "background.jpg"   # широкая, например 1200×500
+# server = "mc.example.com"       # сервер: статус в лаунчере и «сразу заходить на сервер» (порт — "host:25570")
+
+# Что НЕ попадает в сборку: личные данные игрока и мусор.
+# «*» — внутри одной папки, «**» — на любую глубину, «re:…» — регулярное выражение.
+# pack.toml, иконка, фон, mods-clients/, .scam/, .DS_Store исключаются сами.
+exclude = [
+  # миры, логи, скриншоты
+  "saves/**", "logs/**", "crash-reports/**", "screenshots/**", "debug/**",
+  "backups/**", "replay_recordings/**", "schematics/**", "downloads/**",
+  # служебное загрузчиков и модов
+  ".fabric/**", ".mixin.out/**", ".cache/**", "local/**", "kubejs/exported/**",
+  # данные карт — у каждого игрока свои
+  "journeymap/data/**", "XaeroWorldMap/**", "XaeroWaypoints/**",
+  # личные файлы игры
+  "*.log", "usercache.json", "usernamecache.json", "realms_persistence.json",
+  "command_history.txt", "hotbar.nbt", "servers.dat_old", "patchouli_data.json",
+]
+
+# ------------------------------------------------------------
+#  Группы. Файл попадает в ПЕРВУЮ подходящую группу.
+#  Файл, не попавший никуда, — ошибка публикации (добавь в группу или в exclude).
+#
+#  mode = "sync" — всегда как в сборке: изменённое и удалённое игроком восстанавливается.
+#    prune — где удалять лишнее (файлы, которых нет в сборке).
+#  mode = "once" — ставится один раз, дальше это файлы игрока. Ставится заново, если:
+#    · игрок удалил корень группы целиком (папку shaderpacks/, файл options.txt…);
+#    · ты увеличил revision — у всех перезапишется один раз, старое уйдёт в бэкап;
+#    · игрок нажал «Восстановить файлы…».
+# ------------------------------------------------------------
+
+# Опциональные моды: игрок включает и выключает их в «Настройках сборки».
+# Каждая такая группа — ВЫШЕ общей группы mods (файл попадает в первую подходящую группу).
+# [[group]]
+# id = "minimap"
+# name = "Миникарта"
+# description = "Xaero's Minimap — карта в углу экрана"
+# mode = "sync"
+# optional = true
+# default = true                  # включена, пока игрок не выключит (false — выключена)
+# include = ["mods/Xaeros_Minimap*.jar"]
+
+[[group]]
+id = "mods"
+name = "Моды"
+mode = "sync"
+include = ["mods/*.jar"]
+prune = ["mods/*.jar"]            # лишние .jar в mods/ удаляются (кроме клиентских модов игрока)
+
+# Конфиги, которые обязаны совпадать с сервером (иначе не пустит) — всегда как в сборке.
+# Поставь эту группу ВЫШЕ общей группы configs.
+# [[group]]
+# id = "server-configs"
+# name = "Серверные конфиги"
+# mode = "sync"
+# include = ['re:^config/(create|mekanism)-common\.toml$']
+
+[[group]]
+id = "controls"
+name = "Настройки и управление"
+mode = "once"
+revision = 1
+include = ['re:^options(of|shaders)?\.txt$']   # options.txt, optionsof.txt, optionsshaders.txt
+
+[[group]]
+id = "configs"
+name = "Конфиги модов"
+mode = "once"
+revision = 1
+include = ["config/**", "defaultconfigs/**", "kubejs/**", "journeymap/**"]
+
+[[group]]
+id = "shaders"
+name = "Шейдеры"
+mode = "once"
+revision = 1
+include = ["shaderpacks/**"]
+
+[[group]]
+id = "resourcepacks"
+name = "Текстуры"
+mode = "once"
+revision = 1
+include = ["resourcepacks/**"]
+
+[[group]]
+id = "emotes"
+name = "Эмоции"
+mode = "once"
+revision = 1
+include = ["emotes/**"]
+
+[[group]]
+id = "servers"
+name = "Список серверов"
+mode = "once"
+revision = 1
+include = ["servers.dat"]

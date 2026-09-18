@@ -28,6 +28,24 @@ impl AppState {
         }
     }
 
+    /// Запрос с настройками игрока для этой сборки.
+    fn request(&self, pack: String, build: u64, task: game::Task) -> game::PlayRequest {
+        let ps = self
+            .settings
+            .get()
+            .packs
+            .get(&pack)
+            .cloned()
+            .unwrap_or_default();
+        game::PlayRequest {
+            pack,
+            build,
+            task,
+            optional: ps.optional,
+            backup_worlds: ps.backup_worlds,
+        }
+    }
+
     fn public_disk(&self) -> PublicDisk {
         PublicDisk::new(
             self.http.clone(),
@@ -64,12 +82,76 @@ async fn play(
     let pack_settings = s.packs.get(&pack).cloned().unwrap_or_default();
     let mut jvm_args = settings::split_args(&s.jvm_args)?;
     jvm_args.extend(settings::split_args(&pack_settings.jvm_args)?);
+    let own_server = Some(pack_settings.server.trim().to_owned()).filter(|s| !s.is_empty());
     let task = game::Task::Play {
         nick,
         memory_mb: pack_settings.memory_mb,
         jvm_args,
+        auto_connect: pack_settings.auto_connect.then_some(own_server),
     };
-    game::start(state.ctx(app), game::PlayRequest { pack, build, task }).await
+    game::start(state.ctx(app), state.request(pack, build, task)).await
+}
+
+#[tauri::command]
+async fn install(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, AppState>,
+    pack: String,
+    build: u64,
+) -> Res<()> {
+    let task = game::Task::Install;
+    game::start(state.ctx(app), state.request(pack, build, task)).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceInfo {
+    /// Установленный билд; `None` — сборка ещё не скачана.
+    installed_build: Option<u64>,
+}
+
+#[tauri::command]
+fn instance_info(state: tauri::State<'_, AppState>, pack: String) -> Res<InstanceInfo> {
+    if !scam_core::paths::is_valid_id(&pack) {
+        return Err("Неверный id сборки".into());
+    }
+    let dir = state.settings.dirs().instance(&pack);
+    Ok(InstanceInfo {
+        installed_build: scam_core::sync::InstanceState::load(&dir).build,
+    })
+}
+
+/// Удаляет папку сборки с компьютера — в корзину, чтобы можно было вернуть.
+#[tauri::command]
+async fn delete_instance(state: tauri::State<'_, AppState>, pack: String) -> Res<()> {
+    if !scam_core::paths::is_valid_id(&pack) {
+        return Err("Неверный id сборки".into());
+    }
+    if state.game.running_pack().await.is_some() {
+        return Err("Сначала закрой игру".into());
+    }
+    let dir = state.settings.dirs().instance(&pack);
+    if !dir.exists() {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || trash::delete(&dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| {
+            format!(
+                "Не удалось переместить папку в корзину: {e}. Удали её вручную через «Папка игры»."
+            )
+        })
+}
+
+/// Открывает ссылку в браузере (только http/https).
+#[tauri::command]
+fn open_link(url: String) -> Res<()> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("Открываются только ссылки http/https".into());
+    }
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -80,7 +162,7 @@ async fn repair(
     build: u64,
 ) -> Res<()> {
     let task = game::Task::Repair;
-    game::start(state.ctx(app), game::PlayRequest { pack, build, task }).await
+    game::start(state.ctx(app), state.request(pack, build, task)).await
 }
 
 #[tauri::command]
@@ -95,7 +177,7 @@ async fn restore(
         return Err("Не выбрано ни одной группы".into());
     }
     let task = game::Task::Restore { groups };
-    game::start(state.ctx(app), game::PlayRequest { pack, build, task }).await
+    game::start(state.ctx(app), state.request(pack, build, task)).await
 }
 
 #[tauri::command]
@@ -108,20 +190,25 @@ async fn running_pack(state: tauri::State<'_, AppState>) -> Res<Option<String>> 
     Ok(state.game.running_pack().await)
 }
 
-/// Открывает папку игры сборки или её `mods-clients`.
+/// Открывает папку игры сборки, её `mods-clients` или бэкапы миров.
 #[tauri::command]
 fn open_instance_dir(
     state: tauri::State<'_, AppState>,
     pack: String,
-    client_mods: bool,
+    what: Option<String>,
 ) -> Res<()> {
     if !scam_core::paths::is_valid_id(&pack) {
         return Err("Неверный id сборки".into());
     }
-    let mut dir = state.settings.dirs().instance(&pack);
-    if client_mods {
-        dir = dir.join(scam_core::sync::CLIENT_MODS_DIR);
-    }
+    let base = state.settings.dirs().instance(&pack);
+    let dir = match what.as_deref() {
+        None => base,
+        Some("clientMods") => base.join(scam_core::sync::CLIENT_MODS_DIR),
+        Some("worldBackups") => base
+            .join(scam_core::sync::STATE_DIR)
+            .join(scam_core::sync::WORLD_BACKUPS_DIR),
+        Some(other) => return Err(format!("неизвестная папка {other}")),
+    };
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| e.to_string())
 }
@@ -210,6 +297,15 @@ async fn move_game_dir(
     state.settings.save(s)
 }
 
+/// Статус сервера для карточки сборки.
+#[tauri::command]
+async fn server_status(address: String) -> Res<scam_mc::server::Status> {
+    let addr = scam_core::server::ServerAddress::parse(&address)?;
+    scam_mc::server::ping(&addr)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 fn total_memory_mb() -> u64 {
     settings::total_memory_mb()
@@ -290,6 +386,10 @@ pub fn run() {
             get_catalog,
             get_build,
             play,
+            install,
+            instance_info,
+            delete_instance,
+            open_link,
             repair,
             restore,
             kill_game,
@@ -300,6 +400,7 @@ pub fn run() {
             save_settings,
             move_game_dir,
             total_memory_mb,
+            server_status,
             get_image
         ])
         .run(tauri::generate_context!())

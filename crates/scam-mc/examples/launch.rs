@@ -76,6 +76,7 @@ async fn main() -> anyhow::Result<()> {
         extra_jvm_args: vec![],
         launcher_name: "ScamLauncher".into(),
         launcher_version: "dev".into(),
+        server: None,
     };
     let cmd = scam_mc::launch::command_line(&dirs, &prepared, &opts)?;
     let missing: Vec<_> = prepared.classpath.iter().filter(|p| !p.is_file()).collect();

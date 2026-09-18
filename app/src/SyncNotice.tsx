@@ -16,6 +16,7 @@ export function DoneNotice({
     parts.push(`скачано файлов: ${report.downloaded} (${formatSize(report.downloadedBytes)})`);
   }
   if (report.removed.length > 0) parts.push(`удалено лишних: ${report.removed.length}`);
+  if (report.worldsBackup) parts.push("миры сохранены в бэкап");
   if (report.installedGroups.length > 0) {
     parts.push(`восстановлено: ${report.installedGroups.map((g) => g.title).join(", ")}`);
   }

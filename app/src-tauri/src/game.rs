@@ -75,7 +75,11 @@ pub enum Task {
         /// Память из настроек сборки; `None` — рекомендованная сборкой.
         memory_mb: Option<u32>,
         jvm_args: Vec<String>,
+        /// Автоподключение: свой адрес игрока или `None` — адрес из сборки.
+        auto_connect: Option<Option<String>>,
     },
+    /// «Установить» / «Обновить»: скачать всё, но игру не запускать.
+    Install,
     /// «Проверить и починить»: всё с пересчётом хэшей.
     Repair,
     /// «Восстановить файлы сборки»: заново поставить выбранные once-группы.
@@ -86,7 +90,13 @@ pub struct PlayRequest {
     pub pack: String,
     pub build: u64,
     pub task: Task,
+    /// Выбор опциональных модов: id группы → включена.
+    pub optional: std::collections::BTreeMap<String, bool>,
+    pub backup_worlds: bool,
 }
+
+/// Сколько бэкапов миров хранить.
+const WORLD_BACKUPS: usize = 3;
 
 pub struct Ctx {
     pub app: AppHandle,
@@ -253,25 +263,49 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
         &game_dir,
         &manifest,
         &source,
-        &SyncOptions { verify, reinstall },
+        &SyncOptions {
+            verify,
+            reinstall,
+            disabled: manifest
+                .groups
+                .iter()
+                .filter(|g| {
+                    g.optional
+                        && !req
+                            .optional
+                            .get(&g.id)
+                            .copied()
+                            .unwrap_or(g.enabled_by_default)
+                })
+                .map(|g| g.id.clone())
+                .collect(),
+            world_backups: if req.backup_worlds { WORLD_BACKUPS } else { 0 },
+        },
         &sync_progress,
     )
     .await?;
 
-    let (nick, memory_mb, jvm_args, prepared) = match (&req.task, prepared) {
+    let (nick, memory_mb, jvm_args, auto_connect, prepared) = match (&req.task, prepared) {
         (
             Task::Play {
                 nick,
                 memory_mb,
                 jvm_args,
+                auto_connect,
             },
             Some(p),
-        ) => (nick.clone(), *memory_mb, jvm_args.clone(), p),
+        ) => (
+            nick.clone(),
+            *memory_mb,
+            jvm_args.clone(),
+            auto_connect.clone(),
+            p,
+        ),
         (task, _) => {
-            let task = if matches!(task, Task::Repair) {
-                "repair"
-            } else {
-                "restore"
+            let task = match task {
+                Task::Install => "install",
+                Task::Repair => "repair",
+                _ => "restore",
             };
             emit(app, GameEvent::Done { pack, task, report });
             return Ok(());
@@ -285,6 +319,26 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
         },
     );
 
+    // Автоподключение: адрес игрока или из сборки; SRV ищем здесь для старых версий.
+    let server = match auto_connect {
+        Some(own) => {
+            let address =
+                own.or_else(|| index.value.pack(&req.pack).and_then(|p| p.server.clone()));
+            match address.map(|a| scam_core::server::ServerAddress::parse(&a)) {
+                Some(Ok(addr)) => {
+                    let (host, port) = scam_mc::server::resolve(&addr).await;
+                    Some(launch::ServerTarget {
+                        address: addr.to_string(),
+                        host,
+                        port,
+                    })
+                }
+                Some(Err(e)) => anyhow::bail!("адрес сервера: {e}"),
+                None => None,
+            }
+        }
+        None => None,
+    };
     let max_memory = memory_mb
         .or(manifest.memory.recommended)
         .unwrap_or(4096)
@@ -297,6 +351,7 @@ async fn run(ctx: &Ctx, req: &PlayRequest) -> anyhow::Result<()> {
         extra_jvm_args: jvm_args,
         launcher_name: "ScamLauncher".into(),
         launcher_version: app.package_info().version.to_string(),
+        server,
     };
     emit(
         app,

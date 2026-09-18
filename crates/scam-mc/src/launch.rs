@@ -23,6 +23,18 @@ pub struct LaunchOptions {
     pub extra_jvm_args: Vec<String>,
     pub launcher_name: String,
     pub launcher_version: String,
+    /// Сразу зайти на сервер.
+    pub server: Option<ServerTarget>,
+}
+
+/// Куда заходить при запуске.
+#[derive(Debug, Clone)]
+pub struct ServerTarget {
+    /// Как написал автор (`mc.example.com`) — для quick play, игра сама найдёт SRV.
+    pub address: String,
+    /// Уже найденные хост и порт — для старых версий с `--server/--port`.
+    pub host: String,
+    pub port: u16,
 }
 
 /// Такие же флаги сборщика мусора ставит официальный лаунчер.
@@ -120,6 +132,24 @@ pub fn command_line(dirs: &GameDirs, p: &Prepared, o: &LaunchOptions) -> Result<
         v.kind.clone().unwrap_or_else(|| "release".into()),
     );
 
+    // Автоподключение: с 1.20 — quick play, раньше — --server/--port.
+    let mut env = p.env.clone();
+    let quick_play = v.arguments.as_ref().is_some_and(|a| {
+        a.game.iter().any(|arg| match arg {
+            Arg::Ruled { rules: r, .. } => r.iter().any(|rule| {
+                rule.features
+                    .as_ref()
+                    .is_some_and(|f| f.contains_key("is_quick_play_multiplayer"))
+            }),
+            Arg::Plain(_) => false,
+        })
+    });
+    if let (Some(server), true) = (&o.server, quick_play) {
+        env.features
+            .insert("is_quick_play_multiplayer".into(), true);
+        vars.insert("quickPlayMultiplayer", server.address.clone());
+    }
+
     let mut args: Vec<String> = Vec::new();
     if let Some(min) = o.memory_min_mb {
         args.push(format!("-Xms{min}M"));
@@ -129,7 +159,7 @@ pub fn command_line(dirs: &GameDirs, p: &Prepared, o: &LaunchOptions) -> Result<
     args.extend(o.extra_jvm_args.iter().cloned());
 
     match v.arguments.as_ref().filter(|a| !a.jvm.is_empty()) {
-        Some(a) => args.extend(expand(&a.jvm, &p.env, &vars)),
+        Some(a) => args.extend(expand(&a.jvm, &env, &vars)),
         None => {
             args.push(substitute(
                 "-Djava.library.path=${natives_directory}",
@@ -151,9 +181,17 @@ pub fn command_line(dirs: &GameDirs, p: &Prepared, o: &LaunchOptions) -> Result<
     );
 
     match (&v.arguments, &v.minecraft_arguments) {
-        (Some(a), _) if !a.game.is_empty() => args.extend(expand(&a.game, &p.env, &vars)),
+        (Some(a), _) if !a.game.is_empty() => args.extend(expand(&a.game, &env, &vars)),
         (_, Some(legacy)) => args.extend(legacy.split_whitespace().map(|s| substitute(s, &vars))),
         _ => bail!("в JSON версии нет аргументов игры"),
+    }
+    if let (Some(server), false) = (&o.server, quick_play) {
+        args.extend([
+            "--server".into(),
+            server.host.clone(),
+            "--port".into(),
+            server.port.to_string(),
+        ]);
     }
     Ok(args)
 }
@@ -218,6 +256,69 @@ pub async fn pump_logs(child: &mut Child, on_line: impl FnMut(LogLine)) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn prepared(game_args: &str) -> Prepared {
+        let version: crate::version::VersionJson = serde_json::from_str(&format!(
+            r#"{{"id":"v","mainClass":"M","arguments":{{"game":{game_args},"jvm":["-cp","${{classpath}}"]}},
+                "assetIndex":{{"id":"5","url":"u","sha1":"s","size":1}}}}"#
+        ))
+        .unwrap();
+        Prepared {
+            version,
+            env: rules::Env::with_arch("x86_64"),
+            java: "java".into(),
+            classpath: vec!["a.jar".into()],
+            natives_dir: "/n".into(),
+        }
+    }
+
+    fn opts(server: Option<ServerTarget>) -> LaunchOptions {
+        LaunchOptions {
+            game_dir: "/g".into(),
+            player: "Steve".into(),
+            memory_max_mb: 2048,
+            memory_min_mb: None,
+            extra_jvm_args: vec![],
+            launcher_name: "L".into(),
+            launcher_version: "1".into(),
+            server,
+        }
+    }
+
+    fn target() -> ServerTarget {
+        ServerTarget {
+            address: "mc.example.com".into(),
+            host: "srv.example.com".into(),
+            port: 25570,
+        }
+    }
+
+    #[test]
+    fn autoconnect_quick_play_and_legacy() {
+        let dirs = GameDirs::new("/root");
+        let modern = prepared(
+            r#"["--username","${auth_player_name}",
+               {"rules":[{"action":"allow","features":{"is_quick_play_multiplayer":true}}],
+                "value":["--quickPlayMultiplayer","${quickPlayMultiplayer}"]}]"#,
+        );
+        let args = command_line(&dirs, &modern, &opts(Some(target()))).unwrap();
+        let i = args
+            .iter()
+            .position(|a| a == "--quickPlayMultiplayer")
+            .unwrap();
+        assert_eq!(args[i + 1], "mc.example.com");
+        assert!(!args.contains(&"--server".to_string()));
+        // Без автоподключения quick play не включается.
+        let args = command_line(&dirs, &modern, &opts(None)).unwrap();
+        assert!(!args.contains(&"--quickPlayMultiplayer".to_string()));
+
+        let legacy = prepared(r#"["--username","${auth_player_name}"]"#);
+        let args = command_line(&dirs, &legacy, &opts(Some(target()))).unwrap();
+        assert_eq!(
+            &args[args.len() - 4..],
+            ["--server", "srv.example.com", "--port", "25570"]
+        );
+    }
 
     #[test]
     fn substitution() {

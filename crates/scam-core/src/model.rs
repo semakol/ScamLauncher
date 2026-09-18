@@ -15,6 +15,10 @@ pub struct Index {
     pub schema: u32,
     #[serde(default)]
     pub packs: Vec<IndexPack>,
+    /// Скрытые сборки: лаунчер их не показывает, но билды и файлы на месте.
+    /// Отдельным списком, а не флагом — чтобы их не показывали и старые версии лаунчера.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden: Vec<IndexPack>,
     /// Зеркала: тип источника (`mojang-meta`, `libraries`, …) → базовые URL по приоритету.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub mirrors: BTreeMap<String, Vec<String>>,
@@ -25,18 +29,53 @@ impl Default for Index {
         Self {
             schema: SCHEMA,
             packs: Vec::new(),
+            hidden: Vec::new(),
             mirrors: BTreeMap::new(),
         }
     }
 }
 
 impl Index {
+    /// Сборка по id — и видимая, и скрытая.
     pub fn pack(&self, id: &str) -> Option<&IndexPack> {
-        self.packs.iter().find(|p| p.id == id)
+        self.all_packs().find(|p| p.id == id)
     }
 
     pub fn pack_mut(&mut self, id: &str) -> Option<&mut IndexPack> {
-        self.packs.iter_mut().find(|p| p.id == id)
+        self.packs
+            .iter_mut()
+            .chain(self.hidden.iter_mut())
+            .find(|p| p.id == id)
+    }
+
+    /// Все сборки на диске, включая скрытые.
+    pub fn all_packs(&self) -> impl Iterator<Item = &IndexPack> {
+        self.packs.iter().chain(self.hidden.iter())
+    }
+
+    pub fn is_hidden(&self, id: &str) -> bool {
+        self.hidden.iter().any(|p| p.id == id)
+    }
+
+    /// Прячет или показывает сборку. `false` — сборки нет или она уже в нужном состоянии.
+    pub fn set_hidden(&mut self, id: &str, hidden: bool) -> bool {
+        let (from, to) = if hidden {
+            (&mut self.packs, &mut self.hidden)
+        } else {
+            (&mut self.hidden, &mut self.packs)
+        };
+        match from.iter().position(|p| p.id == id) {
+            Some(i) => {
+                to.push(from.remove(i));
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn remove(&mut self, id: &str) {
+        self.packs.retain(|p| p.id != id);
+        self.hidden.retain(|p| p.id != id);
     }
 }
 
@@ -52,6 +91,9 @@ pub struct IndexPack {
     pub icon: Option<ObjectRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<ObjectRef>,
+    /// Адрес сервера сборки (`mc.example.com` или `host:port`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
     #[serde(default)]
     pub channels: Channels,
     pub updated: DateTime<Utc>,
@@ -236,6 +278,15 @@ pub struct Group {
     /// Для `sync`: маски, в пределах которых лишние файлы удаляются.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub prune: Vec<String>,
+    /// Опциональная группа: игрок может её выключить.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+    /// Для опциональной: включена ли, пока игрок не решил сам.
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub enabled_by_default: bool,
+    /// Пояснение для игрока (показывается у опциональных групп).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 impl Group {
@@ -246,6 +297,14 @@ impl Group {
 
 fn default_revision() -> u32 {
     1
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_true(v: &bool) -> bool {
+    *v
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -304,6 +363,7 @@ mod tests {
             loader: LoaderKind::Fabric,
             icon: None,
             background: None,
+            server: None,
             channels: Channels {
                 stable: stable.map(info),
                 beta: beta.map(info),
@@ -331,6 +391,30 @@ mod tests {
         assert_eq!(p.resolve(true).unwrap().1.build, 3);
 
         assert!(pack(None, None).resolve(true).is_none());
+    }
+
+    #[test]
+    fn hide_and_show() {
+        let mut index = Index::default();
+        index.packs.push(pack(Some(1), None));
+        assert!(index.set_hidden("p", true));
+        assert!(!index.set_hidden("p", true));
+        assert!(index.packs.is_empty() && index.is_hidden("p"));
+        assert!(index.pack("p").is_some(), "скрытая сборка находится по id");
+        assert_eq!(index.all_packs().count(), 1);
+
+        // Старый лаунчер (без поля hidden) скрытую сборку не увидит.
+        #[derive(serde::Deserialize)]
+        struct OldIndex {
+            packs: Vec<serde_json::Value>,
+        }
+        let old: OldIndex = serde_json::from_str(&serde_json::to_string(&index).unwrap()).unwrap();
+        assert!(old.packs.is_empty());
+
+        assert!(index.set_hidden("p", false));
+        assert_eq!(index.packs.len(), 1);
+        index.remove("p");
+        assert_eq!(index.all_packs().count(), 0);
     }
 
     #[test]

@@ -16,14 +16,40 @@ pub struct Settings {
     /// Дополнительные JVM-аргументы для всех сборок.
     pub jvm_args: String,
     pub packs: BTreeMap<String, PackSettings>,
+    /// id новостей, которые игрок уже видел.
+    pub seen_news: Vec<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct PackSettings {
     /// Память в МБ; `None` — рекомендованная сборкой.
     pub memory_mb: Option<u32>,
     pub jvm_args: String,
+    /// Свой адрес сервера; пусто — из сборки.
+    pub server: String,
+    /// Показывать статус сервера (по умолчанию да).
+    pub server_status: bool,
+    /// Сразу заходить на сервер при запуске (по умолчанию нет).
+    pub auto_connect: bool,
+    /// Выбор игрока по опциональным модам: id группы → включена.
+    pub optional: BTreeMap<String, bool>,
+    /// Бэкап миров перед обновлением сборки (по умолчанию да).
+    pub backup_worlds: bool,
+}
+
+impl Default for PackSettings {
+    fn default() -> Self {
+        Self {
+            memory_mb: None,
+            jvm_args: String::new(),
+            server: String::new(),
+            server_status: true,
+            auto_connect: false,
+            optional: BTreeMap::new(),
+            backup_worlds: true,
+        }
+    }
 }
 
 pub struct SettingsStore {

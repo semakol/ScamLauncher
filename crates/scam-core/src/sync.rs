@@ -110,6 +110,10 @@ pub struct SyncOptions {
     pub verify: bool,
     /// once-группы, которые игрок попросил восстановить.
     pub reinstall: Vec<String>,
+    /// Опциональные группы, которые игрок выключил.
+    pub disabled: Vec<String>,
+    /// Сколько бэкапов миров хранить; 0 — не делать бэкап перед обновлением.
+    pub world_backups: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -130,6 +134,8 @@ pub struct SyncReport {
     pub conflicts: Vec<ClientConflict>,
     /// Папка бэкапа, если что-то перезаписывалось.
     pub backup: Option<String>,
+    /// Архив с мирами, если перед обновлением делался бэкап.
+    pub worlds_backup: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -171,6 +177,15 @@ struct Plan {
     client_remove: Vec<String>,
     prune: Vec<String>,
     report: SyncReport,
+}
+
+/// Группы, которые в этот раз не ставятся: опциональные, выключенные игроком.
+fn disabled_groups<'a>(m: &'a BuildManifest, opts: &SyncOptions) -> HashSet<&'a str> {
+    m.groups
+        .iter()
+        .filter(|g| g.optional && opts.disabled.iter().any(|d| d == &g.id))
+        .map(|g| g.id.as_str())
+        .collect()
 }
 
 fn mtime_nanos(meta: &std::fs::Metadata) -> u64 {
@@ -220,6 +235,12 @@ fn under_root(path: &str, root: &str) -> bool {
 
 fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> {
     let state = InstanceState::load(instance);
+    let disabled = disabled_groups(m, opts);
+    let active: Vec<&FileEntry> = m
+        .files
+        .iter()
+        .filter(|f| !disabled.contains(f.group.as_str()))
+        .collect();
     let mut new_hashes = BTreeMap::new();
     let mut downloads: BTreeMap<String, (u64, Vec<String>)> = BTreeMap::new();
     let mut backups = Vec::new();
@@ -235,7 +256,7 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
     };
 
     // sync-группы: всё как в сборке.
-    for f in &m.files {
+    for f in active.iter().copied() {
         let Some(g) = m.group(&f.group) else { continue };
         if g.mode != GroupMode::Sync {
             continue;
@@ -253,7 +274,11 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
     }
 
     // once-группы.
-    for g in m.groups.iter().filter(|g| g.mode == GroupMode::Once) {
+    for g in m
+        .groups
+        .iter()
+        .filter(|g| g.mode == GroupMode::Once && !disabled.contains(g.id.as_str()))
+    {
         let files: Vec<&FileEntry> = m.files.iter().filter(|f| f.group == g.id).collect();
         let installed = state.groups.get(&g.id).copied();
         let (reason, targets): (InstallReason, Vec<&FileEntry>) = if opts.reinstall.contains(&g.id)
@@ -309,9 +334,10 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
     }
 
     // Моды игрока.
-    let pack_paths: HashSet<String> = m.files.iter().map(|f| f.path.to_lowercase()).collect();
+    // Выключенные опциональные моды — не часть сборки: вместо них можно поставить свои.
+    let pack_paths: HashSet<String> = active.iter().map(|f| f.path.to_lowercase()).collect();
     let mut pack_ids: HashMap<&str, ()> = HashMap::new();
-    for f in &m.files {
+    for f in active.iter().copied() {
         for id in &f.mod_ids {
             pack_ids.insert(id, ());
         }
@@ -374,8 +400,7 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
         .collect();
 
     // Лишние файлы в пределах prune.
-    let expected: HashSet<String> = m
-        .files
+    let expected: HashSet<String> = active
         .iter()
         .map(|f| f.path.to_lowercase())
         .chain(
@@ -421,6 +446,22 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
         }
     }
 
+    // Файлы выключенных групп убираем, даже если они вне prune (кроме совпавших с клиентскими).
+    for f in m
+        .files
+        .iter()
+        .filter(|f| disabled.contains(f.group.as_str()))
+    {
+        let client = f
+            .path
+            .strip_prefix(&format!("{MODS_DIR}/"))
+            .is_some_and(|n| client_keep.contains_key(n));
+        if !client && !expected.contains(&f.path.to_lowercase()) && instance.join(&f.path).is_file()
+        {
+            prune.insert(f.path.clone());
+        }
+    }
+
     Ok(Plan {
         state,
         new_hashes,
@@ -433,6 +474,107 @@ fn plan(instance: &Path, m: &BuildManifest, opts: &SyncOptions) -> Result<Plan> 
         prune: prune.into_iter().collect(),
         report,
     })
+}
+
+// ---------- бэкап миров ----------
+
+pub const WORLD_BACKUPS_DIR: &str = "backups/worlds";
+
+/// Упаковывает `saves/` в `.scam/backups/worlds/<дата>-build<N>.zip`, оставляя `keep` последних.
+pub async fn backup_worlds(
+    instance: &Path,
+    build: u64,
+    keep: usize,
+    progress: &(dyn Fn(SyncProgress) + Sync),
+) -> Result<Option<PathBuf>> {
+    let saves = instance.join("saves");
+    let files: Vec<(PathBuf, String, u64)> = {
+        let saves = saves.clone();
+        tokio::task::spawn_blocking(move || -> Result<Vec<(PathBuf, String, u64)>> {
+            if !saves.is_dir() {
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::new();
+            for e in walkdir::WalkDir::new(&saves).follow_links(false) {
+                let e = e?;
+                if !e.file_type().is_file() || e.file_name() == "session.lock" {
+                    continue;
+                }
+                let Some(rel) = e
+                    .path()
+                    .strip_prefix(saves.parent().unwrap())
+                    .ok()
+                    .and_then(|r| r.to_str())
+                else {
+                    continue;
+                };
+                out.push((
+                    e.path().to_owned(),
+                    rel.replace('\\', "/"),
+                    e.metadata()?.len(),
+                ));
+            }
+            Ok(out)
+        })
+        .await??
+    };
+    if files.is_empty() {
+        return Ok(None);
+    }
+
+    progress(SyncProgress::Stage("Бэкап миров".into()));
+    let dir = instance.join(STATE_DIR).join(WORLD_BACKUPS_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let name = format!(
+        "{}-build{build}.zip",
+        chrono::Local::now().format("%Y-%m-%d_%H-%M-%S")
+    );
+    let target = dir.join(&name);
+    let tmp = dir.join(format!("{name}.part"));
+    let total: u64 = files.iter().map(|f| f.2).sum();
+    progress(SyncProgress::Bytes { done: 0, total });
+
+    // Архивация идёт в отдельном потоке, прогресс — через канал.
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let job = {
+        let tmp = tmp.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let file = std::fs::File::create(&tmp)?;
+            let mut zip = zip::ZipWriter::new(std::io::BufWriter::new(file));
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated)
+                .compression_level(Some(1))
+                .large_file(true);
+            for (path, rel, size) in files {
+                zip.start_file(rel, options)?;
+                let mut f = std::fs::File::open(&path)?;
+                std::io::copy(&mut f, &mut zip)?;
+                let _ = tx.send(size);
+            }
+            zip.finish()?;
+            Ok(())
+        })
+    };
+    let mut done = 0;
+    while let Some(n) = rx.recv().await {
+        done += n;
+        progress(SyncProgress::Bytes { done, total });
+    }
+    if let Err(e) = job.await.map_err(anyhow::Error::from).and_then(|r| r) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.context("не удалось сделать бэкап миров"));
+    }
+    std::fs::rename(&tmp, &target)?;
+
+    let mut all: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "zip"))
+        .collect();
+    all.sort();
+    while all.len() > keep {
+        let _ = std::fs::remove_file(all.remove(0));
+    }
+    Ok(Some(target))
 }
 
 // ---------- выполнение ----------
@@ -514,6 +656,15 @@ pub async fn sync(
         prune,
         mut report,
     } = plan;
+
+    // Бэкап миров — только когда сборка меняет версию, а не при первой установке.
+    let updating = state.build.is_some_and(|b| b != manifest.build);
+    if updating && opts.world_backups > 0 {
+        report.worlds_backup =
+            backup_worlds(instance, manifest.build, opts.world_backups, progress)
+                .await?
+                .map(|p| p.to_string_lossy().into_owned());
+    }
 
     report.backup = make_backup(instance, &backups)?.map(|p| p.to_string_lossy().into_owned());
 
@@ -640,6 +791,26 @@ mod tests {
         buf.into_inner()
     }
 
+    fn group(
+        id: &str,
+        name: Option<&str>,
+        mode: GroupMode,
+        roots: &[&str],
+        prune: &[&str],
+    ) -> Group {
+        Group {
+            id: id.into(),
+            name: name.map(Into::into),
+            mode,
+            revision: 1,
+            roots: roots.iter().map(|s| s.to_string()).collect(),
+            prune: prune.iter().map(|s| s.to_string()).collect(),
+            optional: false,
+            enabled_by_default: true,
+            description: None,
+        }
+    }
+
     struct Pack {
         files: Vec<(String, String, Vec<u8>)>,
         groups: Vec<Group>,
@@ -651,30 +822,15 @@ mod tests {
             Pack {
                 files: vec![],
                 groups: vec![
-                    Group {
-                        id: "mods".into(),
-                        name: Some("Моды".into()),
-                        mode: GroupMode::Sync,
-                        revision: 1,
-                        roots: vec![],
-                        prune: vec!["mods/*.jar".into()],
-                    },
-                    Group {
-                        id: "controls".into(),
-                        name: None,
-                        mode: GroupMode::Once,
-                        revision: 1,
-                        roots: vec!["options.txt".into()],
-                        prune: vec![],
-                    },
-                    Group {
-                        id: "shaders".into(),
-                        name: Some("Шейдеры".into()),
-                        mode: GroupMode::Once,
-                        revision: 1,
-                        roots: vec!["shaderpacks".into()],
-                        prune: vec![],
-                    },
+                    group("mods", Some("Моды"), GroupMode::Sync, &[], &["mods/*.jar"]),
+                    group("controls", None, GroupMode::Once, &["options.txt"], &[]),
+                    group(
+                        "shaders",
+                        Some("Шейдеры"),
+                        GroupMode::Once,
+                        &["shaderpacks"],
+                        &[],
+                    ),
                 ],
                 build: 1,
             }
@@ -682,6 +838,15 @@ mod tests {
 
         fn file(mut self, path: &str, group: &str, data: &[u8]) -> Self {
             self.files.push((path.into(), group.into(), data.to_vec()));
+            self
+        }
+
+        /// Опциональная группа модов — ставится ВЫШЕ общей группы mods.
+        fn optional(mut self, id: &str, default: bool) -> Self {
+            let mut g = group(id, Some("Миникарта"), GroupMode::Sync, &[], &[]);
+            g.optional = true;
+            g.enabled_by_default = default;
+            self.groups.insert(0, g);
             self
         }
 
@@ -949,6 +1114,112 @@ mod tests {
         let (_, n) = run(dir.path(), &next, opts).await;
         assert_eq!(n, 1);
         assert_eq!(read(dir.path(), "mods/sodium.jar").unwrap(), jar("sodium"));
+    }
+
+    #[tokio::test]
+    async fn optional_group_can_be_disabled_and_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let pack = base().optional("minimap", true).file(
+            "mods/minimap.jar",
+            "minimap",
+            &jar("xaerominimap"),
+        );
+        let (r, _) = run(dir.path(), &pack, Default::default()).await;
+        assert!(
+            read(dir.path(), "mods/minimap.jar").is_some(),
+            "включена по умолчанию"
+        );
+        assert!(r.removed.is_empty());
+
+        // Игрок выключил миникарту и положил свою версию того же мода.
+        std::fs::write(
+            dir.path().join(CLIENT_MODS_DIR).join("my-minimap.jar"),
+            jar("xaerominimap"),
+        )
+        .unwrap();
+        let off = SyncOptions {
+            disabled: vec!["minimap".into()],
+            ..Default::default()
+        };
+        let (r, n) = run(dir.path(), &pack, off.clone()).await;
+        assert_eq!(n, 0);
+        assert_eq!(r.removed, vec!["mods/minimap.jar"]);
+        assert!(
+            r.conflicts.is_empty(),
+            "мод сборки выключен — своя версия не конфликтует"
+        );
+        assert_eq!(r.client_copied, vec!["my-minimap.jar"]);
+
+        // Выключение обычной (не опциональной) группы игнорируется.
+        let (_, n) = run(
+            dir.path(),
+            &pack,
+            SyncOptions {
+                disabled: vec!["minimap".into(), "mods".into()],
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(n, 0);
+        assert!(read(dir.path(), "mods/sodium.jar").is_some());
+
+        // Снова включил — мод вернулся.
+        std::fs::remove_file(dir.path().join(CLIENT_MODS_DIR).join("my-minimap.jar")).unwrap();
+        run(dir.path(), &pack, Default::default()).await;
+        assert!(read(dir.path(), "mods/minimap.jar").is_some());
+        assert!(read(dir.path(), "mods/my-minimap.jar").is_none());
+    }
+
+    #[tokio::test]
+    async fn worlds_backed_up_only_on_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let opts = SyncOptions {
+            world_backups: 2,
+            ..Default::default()
+        };
+        let (r, _) = run(dir.path(), &base(), opts.clone()).await;
+        assert!(
+            r.worlds_backup.is_none(),
+            "первая установка — бэкапить нечего"
+        );
+
+        let world = dir.path().join("saves/Мой мир");
+        std::fs::create_dir_all(world.join("region")).unwrap();
+        std::fs::write(world.join("level.dat"), b"level").unwrap();
+        std::fs::write(world.join("region/r.0.0.mca"), vec![7u8; 100_000]).unwrap();
+        std::fs::write(world.join("session.lock"), b"").unwrap();
+
+        let (r, _) = run(dir.path(), &base(), opts.clone()).await;
+        assert!(r.worlds_backup.is_none(), "та же версия — без бэкапа");
+
+        let mut archives = Vec::new();
+        for build in 2..=4 {
+            let mut next = base();
+            next.build = build;
+            let (r, _) = run(dir.path(), &next, opts.clone()).await;
+            archives.push(PathBuf::from(r.worlds_backup.expect("обновление — бэкап")));
+            std::thread::sleep(std::time::Duration::from_millis(1100)); // разные имена по секундам
+        }
+        let zip_path = archives.last().unwrap();
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(zip_path).unwrap()).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["saves/Мой мир/level.dat", "saves/Мой мир/region/r.0.0.mca"]
+        );
+        let left = std::fs::read_dir(zip_path.parent().unwrap())
+            .unwrap()
+            .count();
+        assert_eq!(left, 2, "хранятся только последние");
+
+        // Выключено — бэкапа нет.
+        let mut next = base();
+        next.build = 9;
+        let (r, _) = run(dir.path(), &next, Default::default()).await;
+        assert!(r.worlds_backup.is_none());
     }
 
     #[tokio::test]

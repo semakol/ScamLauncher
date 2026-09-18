@@ -50,6 +50,9 @@ pub struct PackMeta {
     pub icon: Option<String>,
     #[serde(default)]
     pub background: Option<String>,
+    /// Адрес сервера для статуса и автоподключения в лаунчере.
+    #[serde(default)]
+    pub server: Option<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
 }
@@ -72,6 +75,12 @@ struct RawGroup {
     roots: Vec<String>,
     #[serde(default)]
     prune: Vec<String>,
+    #[serde(default)]
+    optional: bool,
+    #[serde(default)]
+    default: Option<bool>,
+    #[serde(default)]
+    description: Option<String>,
 }
 
 #[derive(Debug)]
@@ -83,6 +92,9 @@ pub struct GroupDef {
     pub include: PatternSet,
     pub roots: Vec<String>,
     pub prune: Vec<String>,
+    pub optional: bool,
+    pub enabled_by_default: bool,
+    pub description: Option<String>,
 }
 
 #[derive(Debug)]
@@ -131,6 +143,10 @@ impl Pack {
         let loader: LoaderKind = meta.loader.parse().map_err(anyhow::Error::msg)?;
         if loader != LoaderKind::Vanilla && meta.loader_version.is_none() {
             bail!("для {} нужен pack.loader_version", loader.title());
+        }
+        if let Some(server) = &meta.server {
+            scam_core::server::ServerAddress::parse(server)
+                .map_err(|e| anyhow::anyhow!("pack.server: {e}"))?;
         }
         if let (Some(min), Some(rec)) = (meta.memory_min, meta.memory_recommended) {
             ensure!(min <= rec, "memory_min больше memory_recommended");
@@ -212,6 +228,29 @@ impl Pack {
                     );
                 }
             }
+            if g.optional {
+                ensure!(
+                    g.mode == GroupMode::Sync,
+                    "группа «{}»: optional бывает только у mode = \"sync\" (моды)",
+                    g.id
+                );
+                ensure!(
+                    g.prune.is_empty(),
+                    "группа «{}»: у опциональной группы не должно быть prune — лишнее удаляет общая группа модов",
+                    g.id
+                );
+                ensure!(
+                    g.name.is_some(),
+                    "группа «{}»: опциональной группе нужно name — его видит игрок",
+                    g.id
+                );
+            } else {
+                ensure!(
+                    g.default.is_none(),
+                    "группа «{}»: default бывает только с optional = true",
+                    g.id
+                );
+            }
             let revision = g.revision.unwrap_or(1);
             ensure!(revision >= 1, "группа «{}»: revision должна быть ≥ 1", g.id);
             for r in &g.roots {
@@ -248,6 +287,9 @@ impl Pack {
                 revision,
                 roots: g.roots,
                 prune: g.prune,
+                optional: g.optional,
+                enabled_by_default: g.default.unwrap_or(true),
+                description: g.description,
             });
         }
 
@@ -308,6 +350,7 @@ memory_recommended = 4096        # МБ, подсказка для ползун�
 source = "{source}"                      # папка с файлами сборки (как .minecraft)
 # icon = "icon.png"
 # background = "background.jpg"
+# server = "mc.example.com"      # статус сервера и автоподключение в лаунчере
 
 # Что не попадает в сборку. glob: «*» — внутри папки, «**» — на любую глубину.
 # Регулярное выражение — с префиксом «re:», проверяется по пути вида «config/x.toml».
@@ -319,6 +362,18 @@ exclude = [
 ]
 
 # Группы проверяются по порядку, файл попадает в первую подходящую.
+#
+# Опциональные моды (игрок включает/выключает в «Настройках сборки») — отдельные группы
+# ВЫШЕ общей группы mods:
+# [[group]]
+# id = "minimap"
+# name = "Миникарта"
+# description = "Xaero's Minimap"
+# mode = "sync"
+# optional = true
+# default = true                   # включена, пока игрок не выключит
+# include = ["mods/xaeros*minimap*.jar"]
+#
 # Файл, не попавший ни в одну группу, — ошибка публикации (чтобы ничего не утекло случайно).
 #
 # mode = "sync"  — всегда как в сборке: изменённые и удалённые файлы восстанавливаются.
@@ -463,6 +518,16 @@ mod tests {
                 "[[group]]\nid=\"a\"\nmode=\"once\"\ninclude=[\"re:(\"]"
             ))
             .contains("регулярное")
+        );
+        let group = |extra: &str| base(&format!("[[group]]\nid=\"a\"\ninclude=[\"x\"]\n{extra}"));
+        assert!(err(group("name=\"A\"\nmode=\"once\"\noptional=true")).contains("optional"));
+        assert!(err(group("mode=\"sync\"\noptional=true")).contains("name"));
+        assert!(err(group("mode=\"sync\"\ndefault=false")).contains("default"));
+        assert!(
+            err(group(
+                "name=\"A\"\nmode=\"sync\"\noptional=true\nprune=[\"mods/*.jar\"]"
+            ))
+            .contains("prune")
         );
         assert!(err(base("[[group]]\nid=\"a\"\nmode=\"once\"\ninclude=[\"x\"]\n[[group]]\nid=\"a\"\nmode=\"once\"\ninclude=[\"y\"]")).contains("дважды"));
         assert!(

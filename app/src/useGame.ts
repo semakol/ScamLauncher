@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
+  install,
   killGame,
   play,
   repair,
@@ -8,6 +9,7 @@ import {
   runningPack,
   type GameEvent,
   type LogLine,
+  type DoneTask,
   type SyncReport,
 } from "./api";
 
@@ -24,7 +26,7 @@ export type GameState =
       crashReport: string | null;
     }
   | { kind: "failed"; pack: string; message: string }
-  | { kind: "done"; pack: string; task: "repair" | "restore"; report: SyncReport };
+  | { kind: "done"; pack: string; task: DoneTask; report: SyncReport };
 
 const MAX_LINES = 5000;
 
@@ -103,6 +105,10 @@ export function useGame() {
     (pack: string, build: number, nick: string) => run(pack, () => play(pack, build, nick), true),
     [run],
   );
+  const startInstall = useCallback(
+    (pack: string, build: number) => run(pack, () => install(pack, build), false),
+    [run],
+  );
   const startRepair = useCallback(
     (pack: string, build: number) => run(pack, () => repair(pack, build), false),
     [run],
@@ -117,5 +123,16 @@ export function useGame() {
   const dismiss = useCallback(() => setState({ kind: "idle" }), []);
   const dismissSync = useCallback(() => setLastSync(null), []);
 
-  return { state, logs, lastSync, start, startRepair, startRestore, stop, dismiss, dismissSync };
+  return {
+    state,
+    logs,
+    lastSync,
+    start,
+    startInstall,
+    startRepair,
+    startRestore,
+    stop,
+    dismiss,
+    dismissSync,
+  };
 }

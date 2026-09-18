@@ -80,6 +80,9 @@ enum Command {
         /// Пропускать файлы, не попавшие ни в одну группу
         #[arg(long)]
         allow_unmatched: bool,
+        /// Новую сборку сразу скрыть (для уже существующей не действует — см. hide/show)
+        #[arg(long)]
+        hidden: bool,
     },
     /// Сделать билд релизом: бету (по умолчанию) или любой старый (откат)
     Promote {
@@ -89,6 +92,20 @@ enum Command {
     },
     /// Список сборок на диске
     List,
+    /// Скрыть сборку из лаунчера, ничего не удаляя
+    Hide { pack: String },
+    /// Снова показать скрытую сборку
+    Show { pack: String },
+    /// Удалить сборку с диска (без --yes — только показать, что удалится)
+    Remove {
+        pack: String,
+        /// Удалять мимо корзины Диска
+        #[arg(long)]
+        permanently: bool,
+        /// Действительно удалить
+        #[arg(long)]
+        yes: bool,
+    },
     /// Новости в лаунчере
     News {
         #[command(subcommand)]
@@ -180,6 +197,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             changelog,
             force,
             allow_unmatched,
+            hidden,
         } => {
             commands::publish(
                 http,
@@ -191,12 +209,20 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     changelog,
                     force,
                     allow_unmatched,
+                    hidden,
                 },
             )
             .await
         }
         Command::Promote { pack, build } => commands::promote(http, &pack, build).await,
         Command::List => commands::list(http).await,
+        Command::Hide { pack } => commands::set_hidden(http, &pack, true).await,
+        Command::Show { pack } => commands::set_hidden(http, &pack, false).await,
+        Command::Remove {
+            pack,
+            permanently,
+            yes,
+        } => commands::remove(http, &pack, permanently, yes).await,
         Command::News { action } => match action {
             NewsAction::Add { title, pack, text } => {
                 commands::news_add(http, title, text, pack).await

@@ -251,6 +251,7 @@ mod tests {
             loader: LoaderKind::Fabric,
             icon: None,
             background: None,
+            server: None,
             channels: Channels::default(),
             updated: chrono::Utc::now(),
         });

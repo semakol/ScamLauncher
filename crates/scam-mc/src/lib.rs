@@ -12,6 +12,7 @@ pub mod log;
 pub mod net;
 pub mod offline;
 pub mod rules;
+pub mod server;
 pub mod version;
 
 pub use dirs::GameDirs;

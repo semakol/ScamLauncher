@@ -114,6 +114,9 @@ pub fn manifest_groups(pack: &Pack, scan: &Scan) -> Vec<Group> {
                 revision: g.revision,
                 roots,
                 prune: g.prune.clone(),
+                optional: g.optional,
+                enabled_by_default: g.enabled_by_default,
+                description: g.description.clone(),
             }
         })
         .collect()

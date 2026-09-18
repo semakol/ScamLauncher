@@ -21,6 +21,7 @@ pub struct PackDto {
     updated: DateTime<Utc>,
     icon: Option<String>,
     background: Option<String>,
+    server: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -49,6 +50,9 @@ pub struct GroupDto {
     mode: GroupMode,
     files: usize,
     size: u64,
+    optional: bool,
+    enabled_by_default: bool,
+    description: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -94,6 +98,7 @@ pub async fn catalog(store: &CachedStore, beta: bool) -> Result<CatalogDto, Stri
                 updated: p.updated,
                 icon: p.icon.as_ref().map(|o| o.sha1.clone()),
                 background: p.background.as_ref().map(|o| o.sha1.clone()),
+                server: p.server.clone(),
             })
         })
         .collect();
@@ -133,6 +138,9 @@ pub async fn build(store: &CachedStore, pack: &str, build: u64) -> Result<BuildD
                 mode: g.mode,
                 files,
                 size,
+                optional: g.optional,
+                enabled_by_default: g.enabled_by_default,
+                description: g.description.clone(),
             }
         })
         .collect();

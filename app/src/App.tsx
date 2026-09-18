@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { formatSize, getCatalog, storage, type Catalog, type Pack } from "./api";
+import {
+  formatSize,
+  getCatalog,
+  instanceInfo,
+  packSettingsOf,
+  storage,
+  type Catalog,
+  type Pack,
+} from "./api";
+import PackSettingsView from "./PackSettingsView";
 import SettingsView from "./SettingsView";
 import { PackIcon } from "./PackImage";
 import { useSettings } from "./useSettings";
@@ -25,7 +34,7 @@ export default function App() {
   const [load, setLoad] = useState<Load>({ kind: "loading" });
   const [selected, setSelected] = useState<string | null>(storage.get("pack"));
   const [consoleOpen, setConsoleOpen] = useState(false);
-  const [view, setView] = useState<"main" | "settings">("main");
+  const [view, setView] = useState<"main" | "settings" | "packSettings">("main");
   const game = useGame();
   const settings = useSettings();
   const updater = useUpdater();
@@ -69,6 +78,33 @@ export default function App() {
 
   const catalog = load.kind === "ready" ? load.catalog : null;
   const pack = catalog?.packs.find((p) => p.id === selected) ?? null;
+
+  // Какой билд установлен: от этого зависит «Установить» / «Обновить» / «Играть».
+  const [installed, setInstalled] = useState<{ pack: string; build: number | null } | null>(null);
+  const packId = pack?.id;
+  const gameKind = game.state.kind;
+  useEffect(() => {
+    if (!packId || gameKind === "preparing") return;
+    let alive = true;
+    instanceInfo(packId)
+      .then((i) => alive && setInstalled({ pack: packId, build: i.installedBuild }))
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [packId, gameKind]);
+  const installedBuild = installed && installed.pack === packId ? installed.build : undefined;
+
+  // Непрочитанные новости: запоминаем на весь сеанс, а в настройках сразу помечаем как увиденные.
+  const [unseen, setUnseen] = useState<Set<string>>(new Set());
+  const seen = settings.info?.settings.seenNews;
+  useEffect(() => {
+    if (!catalog || !seen) return;
+    const fresh = catalog.news.map((n) => n.id).filter((id) => !seen.includes(id));
+    if (fresh.length === 0) return;
+    setUnseen((u) => new Set([...u, ...fresh]));
+    updateSettings((s) => ({ ...s, seenNews: [...s.seenNews, ...fresh].slice(-300) }));
+  }, [catalog, seen, updateSettings]);
 
   return (
     <div className="layout">
@@ -141,7 +177,7 @@ export default function App() {
           onShowConsole={() => setConsoleOpen(true)}
           onDismiss={game.dismiss}
         />
-        {game.state.kind === "done" && (
+        {game.state.kind === "done" && game.state.task !== "install" && (
           <DoneNotice task={game.state.task} report={game.state.report} onDismiss={game.dismiss} />
         )}
         {game.lastSync && game.lastSync.pack === pack?.id && (
@@ -163,24 +199,36 @@ export default function App() {
             />
           ) : consoleOpen ? (
             <Console lines={game.logs} onClose={() => setConsoleOpen(false)} />
+          ) : pack && view === "packSettings" ? (
+            <PackSettingsView
+              key={pack.id}
+              pack={pack}
+              value={packSettingsOf(settings.info?.settings, pack.id)}
+              totalMemoryMb={settings.info?.totalMemoryMb ?? 8192}
+              installedBuild={installedBuild ?? null}
+              busy={game.state.kind === "preparing" || game.state.kind === "running"}
+              onSave={(v) => settings.update((s) => ({ ...s, packs: { ...s.packs, [pack.id]: v } }))}
+              onRepair={() => game.startRepair(pack.id, pack.build)}
+              onRestore={(groups) => game.startRestore(pack.id, pack.build, groups)}
+              onDeleted={() => setInstalled({ pack: pack.id, build: null })}
+              onClose={() => setView("main")}
+            />
           ) : pack ? (
             <PackView
               pack={pack}
               news={catalog?.news ?? []}
-              busy={game.state.kind === "preparing" || game.state.kind === "running"}
-              onRepair={() => game.startRepair(pack.id, pack.build)}
-              onRestore={(groups) => game.startRestore(pack.id, pack.build, groups)}
-              packSettings={settings.info?.settings.packs[pack.id] ?? { memoryMb: null, jvmArgs: "" }}
-              totalMemoryMb={settings.info?.totalMemoryMb ?? 8192}
-              onSaveSettings={(v) =>
-                settings.update((s) => ({ ...s, packs: { ...s.packs, [pack.id]: v } }))
-              }
+              unseen={unseen}
+              statusAddress={(() => {
+                const ps = packSettingsOf(settings.info?.settings, pack.id);
+                return ps.serverStatus ? ps.server || pack.server || null : null;
+              })()}
+              onOpenSettings={() => setView("packSettings")}
             />
           ) : (
             <div className="hero">
               <h1>Добро пожаловать</h1>
               <p className="muted">Выбери сборку слева, чтобы начать играть.</p>
-              {catalog && <NewsList news={catalog.news.filter((n) => !n.pack)} />}
+              {catalog && <NewsList news={catalog.news.filter((n) => !n.pack)} unseen={unseen} />}
             </div>
           )}
         </div>
@@ -189,12 +237,18 @@ export default function App() {
           nick={nick}
           onNick={setNick}
           game={game.state}
+          installedBuild={installedBuild}
           consoleOpen={consoleOpen}
           onToggleConsole={() => setConsoleOpen((v) => !v)}
           onPlay={() => {
             if (!pack) return;
-            updateSettings((s) => ({ ...s, nick }));
             setView("main");
+            if (installedBuild !== pack.build) {
+              // Не установлена или устарела — сначала скачиваем, играть — следующим нажатием.
+              game.startInstall(pack.id, pack.build);
+              return;
+            }
+            updateSettings((s) => ({ ...s, nick }));
             game.start(pack.id, pack.build, nick);
           }}
           onStop={game.stop}
@@ -213,13 +267,27 @@ interface PlayBarProps {
   nick: string;
   onNick: (v: string) => void;
   game: GameState;
+  /** undefined — ещё не знаем, null — не установлена. */
+  installedBuild: number | null | undefined;
   consoleOpen: boolean;
   onToggleConsole: () => void;
   onPlay: () => void;
   onStop: () => void;
 }
 
-function PlayBar({ pack, nick, onNick, game, consoleOpen, onToggleConsole, onPlay, onStop }: PlayBarProps) {
+function PlayBar({
+  pack,
+  nick,
+  onNick,
+  game,
+  installedBuild,
+  consoleOpen,
+  onToggleConsole,
+  onPlay,
+  onStop,
+}: PlayBarProps) {
+  const mode: "install" | "update" | "play" =
+    installedBuild === null ? "install" : pack && installedBuild !== undefined && installedBuild !== pack.build ? "update" : "play";
   const nickOk = NICK_RE.test(nick);
   const busy = game.kind === "preparing" || game.kind === "running";
   const here = pack !== null && isActive(game, pack.id);
@@ -243,6 +311,10 @@ function PlayBar({ pack, nick, onNick, game, consoleOpen, onToggleConsole, onPla
     );
   } else if (here && game.kind === "running") {
     status = <div className="muted">Игра запущена</div>;
+  } else if (pack && mode === "install") {
+    status = <div className="muted">Сборка ещё не скачана</div>;
+  } else if (pack && mode === "update") {
+    status = <div className="muted">Доступно обновление до версии {pack.version}</div>;
   }
 
   let action: React.ReactNode;
@@ -255,7 +327,9 @@ function PlayBar({ pack, nick, onNick, game, consoleOpen, onToggleConsole, onPla
   } else {
     const reason = !pack
       ? "Выбери сборку"
-      : !nickOk
+      : installedBuild === undefined
+        ? "Проверяю…"
+        : mode === "play" && !nickOk
         ? "Ник: 3–16 символов, латиница, цифры и _"
         : busy
           ? here
@@ -264,7 +338,7 @@ function PlayBar({ pack, nick, onNick, game, consoleOpen, onToggleConsole, onPla
           : undefined;
     action = (
       <button className="play" disabled={reason !== undefined} title={reason} onClick={onPlay}>
-        {here ? "Подготовка…" : "Играть"}
+        {here ? "Подготовка…" : mode === "install" ? "Установить" : mode === "update" ? "Обновить" : "Играть"}
       </button>
     );
   }
