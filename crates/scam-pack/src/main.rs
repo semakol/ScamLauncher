@@ -3,6 +3,7 @@ mod commands;
 mod packfile;
 mod publisher;
 mod scan;
+mod selfupdate;
 mod ui;
 
 use clap::{Parser, Subcommand};
@@ -105,6 +106,15 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Обновить scam-pack до последней версии из GitHub Releases
+    SelfUpdate {
+        /// Только проверить, есть ли новая версия
+        #[arg(long)]
+        check: bool,
+        /// Скачать заново, даже если версия та же
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -199,5 +209,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             permanently,
             yes,
         } => commands::gc(http, keep, permanently, yes).await,
+        Command::SelfUpdate { check, force } => selfupdate::run(http, check, force).await,
     }
 }

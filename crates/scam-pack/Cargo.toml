@@ -20,6 +20,8 @@ console.workspace = true
 dirs.workspace = true
 open.workspace = true
 clap = { version = "4", features = ["derive"] }
-
-[dev-dependencies]
 tempfile.workspace = true
+self-replace.workspace = true
+semver.workspace = true
+sha2.workspace = true
+hex = "0.4"

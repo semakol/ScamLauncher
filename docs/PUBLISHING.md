@@ -1,13 +1,28 @@
 # Публикация сборок
 
-Сборки публикует утилита `scam-pack`. Бинарники под все ОС лежат в каждом [релизе](https://github.com/semakol/ScamLauncher/releases/latest)
-(`scam-pack-aarch64-apple-darwin`, `scam-pack-x86_64-pc-windows-msvc.exe` и т.д.). Из исходников:
+Сборки публикует утилита `scam-pack`. Ставится один раз, дальше обновляется сама.
+
+## 0. Установка
+
+**Готовый файл.** Скачай из [последнего релиза](https://github.com/semakol/ScamLauncher/releases/latest) файл под свою систему:
+`scam-pack-aarch64-apple-darwin` (Mac на M1 и новее), `scam-pack-x86_64-apple-darwin` (Mac на Intel),
+`scam-pack-x86_64-pc-windows-msvc.exe`, `scam-pack-x86_64-unknown-linux-gnu`. Переименуй в `scam-pack`
+(`scam-pack.exe`) и положи в папку из PATH. На macOS/Linux: `chmod +x scam-pack`.
+
+**Из исходников:**
 
 ```bash
-cargo build --release -p scam-pack
+cargo install --path crates/scam-pack
 ```
 
-Готовый бинарник будет в `target/release/scam-pack`.
+**Обновление:**
+
+```bash
+scam-pack self-update
+```
+
+Скачивает свежую версию из GitHub Releases, сверяет контрольную сумму и заменяет себя.
+`--check` — только проверить. Токен и `pack.toml` при обновлении не трогаются.
 
 ## 1. Вход (один раз в год)
 

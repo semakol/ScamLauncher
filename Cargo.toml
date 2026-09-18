@@ -32,6 +32,9 @@ console = "0.16"
 dirs = "7"
 open = "5"
 tempfile = "3"
+self-replace = "1.5"
+semver = "1"
+sha2 = "0.11"
 
 [profile.release]
 lto = true

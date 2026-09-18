@@ -21,10 +21,17 @@ jobs:
       - id: create
         name: Черновик релиза
         run: |
-          gh release create "$GITHUB_REF_NAME" --draft --generate-notes \
-            --title "ScamLauncher ${GITHUB_REF_NAME#v}" -R "$GITHUB_REPOSITORY"
           id=$(gh api "repos/$GITHUB_REPOSITORY/releases" \
-            --jq ".[] | select(.tag_name == \"$GITHUB_REF_NAME\") | .id" | head -1)
+            -f tag_name="$GITHUB_REF_NAME" \
+            -f name="ScamLauncher ${GITHUB_REF_NAME#v}" \
+            -F draft=true \
+            -F generate_release_notes=true \
+            --jq .id)
+          if [ -z "$id" ]; then
+            echo "::error::Не удалось создать черновик релиза"
+            exit 1
+          fi
+          echo "Черновик релиза: $id"
           echo "id=$id" >> "$GITHUB_OUTPUT"
 
   build-launcher:
@@ -71,6 +78,14 @@ jobs:
 
       - working-directory: app
         run: npm ci
+
+      - name: Проверка номера релиза
+        shell: bash
+        run: |
+          if [ -z "${{ needs.create-release.outputs.release_id }}" ]; then
+            echo "::error::Пустой release_id — лаунчер некуда загружать"
+            exit 1
+          fi
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -129,5 +144,38 @@ jobs:
     needs: [create-release, build-launcher, build-scam-pack]
     runs-on: ubuntu-latest
     steps:
+      - name: Проверка файлов релиза
+        run: |
+          names=$(gh release view "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          echo "$names"
+          missing=0
+          need() {
+            if ! echo "$names" | grep -Eq "$1"; then
+              echo "::error::В релизе нет файла: $2"
+              missing=1
+            fi
+          }
+          need '^latest\.json$'                          'latest.json'
+          need '_x64-setup\.exe$'                        'установщик Windows'
+          need '_aarch64\.dmg$'                          'dmg для Mac (Apple Silicon)'
+          need '_x64\.dmg$'                              'dmg для Mac (Intel)'
+          need '\.AppImage$'                              'AppImage для Linux'
+          need '^scam-pack-aarch64-apple-darwin$'         'scam-pack macOS arm64'
+          need '^scam-pack-x86_64-apple-darwin$'          'scam-pack macOS x64'
+          need '^scam-pack-x86_64-unknown-linux-gnu$'     'scam-pack Linux'
+          need '^scam-pack-x86_64-pc-windows-msvc\.exe$'  'scam-pack Windows'
+          [ "$missing" = 0 ] || exit 1
+
+      - name: Проверка latest.json
+        run: |
+          gh release download "$GITHUB_REF_NAME" -R "$GITHUB_REPOSITORY" -p latest.json -O latest.json
+          cat latest.json
+          jq -e --arg v "${GITHUB_REF_NAME#v}" '
+            .version == $v and (.platforms as $pl
+              | ["darwin-aarch64", "darwin-x86_64", "linux-x86_64", "windows-x86_64"]
+              | all(($pl[.].signature // "") | length > 0))
+          ' latest.json > /dev/null \
+            || { echo "::error::latest.json неполный: нет платформы, подписи или версия не совпадает"; exit 1; }
+
       - name: Опубликовать релиз
         run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest -R "$GITHUB_REPOSITORY"
